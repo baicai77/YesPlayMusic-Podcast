@@ -3,16 +3,35 @@ import { logout } from '@/api/auth';
 import store from '@/store';
 
 export function setCookies(string) {
-  const cookies = string.split(';;');
-  cookies.map(cookie => {
-    document.cookie = cookie;
-    const cookieKeyValue = cookie.split(';')[0].split('=');
-    localStorage.setItem(`cookie-${cookieKeyValue[0]}`, cookieKeyValue[1]);
+  if (typeof string !== 'string' || !string.trim()) {
+    throw new Error('登录接口未返回有效凭证，请重新扫码');
+  }
+  // API versions join Set-Cookie records with either ; or ;;. Discard upstream
+  // attributes (especially Domain/HttpOnly) and store each cookie on this origin.
+  const attributes = new Set([
+    'domain',
+    'path',
+    'expires',
+    'max-age',
+    'samesite',
+    'secure',
+    'httponly',
+    'priority',
+    'partitioned',
+  ]);
+  string.split(';').forEach(part => {
+    const separator = part.indexOf('=');
+    if (separator < 1) return;
+    const name = part.slice(0, separator).trim();
+    const value = part.slice(separator + 1).trim();
+    if (attributes.has(name.toLowerCase()) || !value) return;
+    Cookies.set(name, value, { path: '/', sameSite: 'Lax', expires: 30 });
+    localStorage.setItem(`cookie-${name}`, value);
   });
 }
 
 export function getCookie(key) {
-  return Cookies.get(key) ?? localStorage.getItem(`cookie-${key}`);
+  return Cookies.get(key) || localStorage.getItem(`cookie-${key}`) || undefined;
 }
 
 export function removeCookie(key) {

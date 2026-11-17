@@ -74,7 +74,14 @@
         <div class="blank"></div>
         <div class="container" @click.stop>
           <button-icon
-            v-show="!player.isPersonalFM"
+            v-show="player.isPodcast"
+            title="快退 15 秒"
+            @click.native="skipBackward"
+          >
+            <span class="skip-pill">-15s</span>
+          </button-icon>
+          <button-icon
+            v-show="!player.isPersonalFM && !player.isPodcast"
             :title="$t('player.previous')"
             @click.native="playPrevTrack"
             ><svg-icon icon-class="previous"
@@ -92,7 +99,17 @@
           >
             <svg-icon :icon-class="player.playing ? 'pause' : 'play'"
           /></button-icon>
-          <button-icon :title="$t('player.next')" @click.native="playNextTrack"
+          <button-icon
+            v-show="player.isPodcast"
+            title="快进 30 秒"
+            @click.native="skipForward"
+          >
+            <span class="skip-pill">+30s</span>
+          </button-icon>
+          <button-icon
+            v-show="!player.isPodcast"
+            :title="$t('player.next')"
+            @click.native="playNextTrack"
             ><svg-icon icon-class="next"
           /></button-icon>
         </div>
@@ -101,6 +118,14 @@
       <div class="right-control-buttons">
         <div class="blank"></div>
         <div class="container" @click.stop>
+          <button
+            v-if="player.isPodcast"
+            class="rate-toggle-btn"
+            title="切换播客倍速"
+            @click="cyclePlaybackRate"
+          >
+            {{ player.playbackRate }}x
+          </button>
           <button-icon
             :title="$t('player.nextUp')"
             :class="{
@@ -268,7 +293,28 @@ export default {
     goToList() {
       goToListSource();
     },
+    skipBackward() {
+      this.player.skipSeconds(-15);
+    },
+    skipForward() {
+      this.player.skipSeconds(30);
+    },
+    cyclePlaybackRate() {
+      const rates = [0.8, 1.0, 1.25, 1.5, 1.75, 2.0];
+      const cur = this.player.playbackRate || 1.0;
+      const idx = rates.indexOf(cur);
+      const nextRate = rates[(idx + 1) % rates.length];
+      this.player.playbackRate = nextRate;
+    },
     goToAlbum() {
+      if (this.player.isPodcast) {
+        const pid =
+          this.player.currentTrack.pid || this.player.playlistSource?.id;
+        if (pid) {
+          this.$router.push({ path: '/podcast/' + pid });
+          return;
+        }
+      }
       if (this.player.currentTrack.al.id === 0) return;
       this.$router.push({ path: '/album/' + this.player.currentTrack.al.id });
     },
@@ -485,6 +531,38 @@ export default {
 
 .like-button {
   margin-left: 16px;
+}
+
+.rate-toggle-btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 3px;
+}
+
+.skip-pill {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text);
+  opacity: 0.88;
+  user-select: none;
+}
+
+.rate-toggle-btn {
+  min-width: 52px;
+  height: 36px;
+  padding: 0 8px;
+  margin-right: 6px;
+  border-radius: 6px;
+  border: none;
+  background: var(--color-secondary-bg);
+  color: var(--color-primary);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+
+  &:hover {
+    background: var(--color-primary-bg);
+  }
 }
 
 .button-icon.disabled {

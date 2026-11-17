@@ -10,9 +10,13 @@ module.exports = {
   devServer: {
     disableHostCheck: true,
     port: process.env.DEV_SERVER_PORT || 8080,
+    before(app) {
+      const xyzServer = require('./src/xyz/server');
+      app.use('/xyz', xyzServer);
+    },
     proxy: {
       '^/api': {
-        target: 'http://localhost:3000',
+        target: process.env.NETEASE_API_PROXY || 'http://127.0.0.1:10754',
         changeOrigin: true,
         pathRewrite: {
           '^/api': '/',
@@ -95,8 +99,8 @@ module.exports = {
         publish: [
           {
             provider: 'github',
-            owner: 'qier222',
-            repo: 'YesPlayMusic',
+            owner: 'baicai77',
+            repo: 'YesPlayMusic-Podcast',
             vPrefixedTagName: true,
             releaseType: 'draft',
           },
@@ -171,6 +175,15 @@ module.exports = {
       },
       // 主线程的配置文件
       chainWebpackMainProcess: config => {
+        config.module
+          .rule('xyz-main-transpile')
+          .test(/\.js$/)
+          .include.add(resolve('src/xyz'))
+          .end()
+          .use('esbuild-loader')
+          .loader('esbuild-loader')
+          .options({ target: 'es2019', format: 'cjs' })
+          .end();
         config.plugin('define').tap(args => {
           args[0]['IS_ELECTRON'] = true;
           return args;

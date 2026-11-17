@@ -1,5 +1,10 @@
 <template>
   <div v-show="show" class="home">
+    <div v-if="loadError" role="alert" class="index-row">
+      音乐内容加载失败，请确认本地 API 服务可用。
+      <button @click="loadData">重试</button>
+      <router-link to="/podcast">前往小宇宙播客</router-link>
+    </div>
     <div
       v-if="settings.showPlaylistsByAppleMusic !== false"
       class="index-row first-row"
@@ -86,6 +91,7 @@ export default {
   data() {
     return {
       show: false,
+      loadError: false,
       recommendPlaylist: { items: [] },
       newReleasesAlbum: { items: [] },
       topList: {
@@ -110,20 +116,27 @@ export default {
   },
   methods: {
     loadData() {
-      setTimeout(() => {
-        if (!this.show) NProgress.start();
-      }, 1000);
-      getRecommendPlayList(10, false).then(items => {
-        this.recommendPlaylist.items = items;
-        NProgress.done();
-        this.show = true;
-      });
+      this.show = true;
+      this.loadError = false;
+      NProgress.start();
+      getRecommendPlayList(10, false)
+        .then(items => {
+          this.recommendPlaylist.items = items;
+        })
+        .catch(() => {
+          this.loadError = true;
+        })
+        .finally(() => NProgress.done());
       newAlbums({
         area: this.settings.musicLanguage ?? 'ALL',
         limit: 10,
-      }).then(data => {
-        this.newReleasesAlbum.items = data.albums;
-      });
+      })
+        .then(data => {
+          this.newReleasesAlbum.items = data.albums;
+        })
+        .catch(() => {
+          this.loadError = true;
+        });
 
       const toplistOfArtistsAreaTable = {
         all: null,
@@ -134,22 +147,30 @@ export default {
       };
       toplistOfArtists(
         toplistOfArtistsAreaTable[this.settings.musicLanguage ?? 'all']
-      ).then(data => {
-        let indexs = [];
-        while (indexs.length < 6) {
-          let tmp = ~~(Math.random() * 100);
-          if (!indexs.includes(tmp)) indexs.push(tmp);
-        }
-        this.recommendArtists.indexs = indexs;
-        this.recommendArtists.items = data.list.artists.filter((l, index) =>
-          indexs.includes(index)
-        );
-      });
-      toplists().then(data => {
-        this.topList.items = data.list.filter(l =>
-          this.topList.ids.includes(l.id)
-        );
-      });
+      )
+        .then(data => {
+          let indexs = [];
+          while (indexs.length < 6) {
+            let tmp = ~~(Math.random() * 100);
+            if (!indexs.includes(tmp)) indexs.push(tmp);
+          }
+          this.recommendArtists.indexs = indexs;
+          this.recommendArtists.items = data.list.artists.filter((l, index) =>
+            indexs.includes(index)
+          );
+        })
+        .catch(() => {
+          this.loadError = true;
+        });
+      toplists()
+        .then(data => {
+          this.topList.items = data.list.filter(l =>
+            this.topList.ids.includes(l.id)
+          );
+        })
+        .catch(() => {
+          this.loadError = true;
+        });
       this.$refs.DailyTracksCard.loadDailyTracks();
     },
   },

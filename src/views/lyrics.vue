@@ -2,7 +2,10 @@
   <transition name="slide-up">
     <div
       class="lyrics-page"
-      :class="{ 'no-lyric': noLyric }"
+      :class="{
+        'no-lyric': noLyric && !player.isPodcast,
+        'podcast-mode': player.isPodcast,
+      }"
       :data-theme="theme"
     >
       <div
@@ -228,7 +231,21 @@
         </div>
       </div>
       <div class="right-side">
-        <transition name="slide-fade">
+        <div v-if="player.isPodcast" class="podcast-shownotes">
+          <div class="shownotes-header"
+            >Show Notes · 节目单
+            <div
+              v-if="currentTrack.playCount != null"
+              class="shownotes-listens"
+              >{{ formatPlayCount(currentTrack.playCount) }}</div
+            >
+          </div>
+          <div
+            class="shownotes-body"
+            v-html="formatShowNotes(currentTrack.showNotes)"
+          ></div>
+        </div>
+        <transition v-else name="slide-fade">
           <div
             v-show="!noLyric"
             ref="lyricsContainer"
@@ -565,8 +582,20 @@ export default {
         this.player.playNextTrack();
       }
     },
+    formatPlayCount(count) {
+      return require('@/xyz/adapter').formatPlayCount(count);
+    },
+    formatShowNotes(notes) {
+      return require('@/xyz/notes').formatShowNotes(notes);
+    },
     getLyric() {
       if (!this.currentTrack.id) return;
+      if (this.player.isPodcast) {
+        this.lyric = [];
+        this.tlyric = [];
+        this.lyricToShow = [];
+        return;
+      }
       if (
         this.currentTrack.pc !== null &&
         this.currentTrack.cd === null &&
@@ -999,6 +1028,31 @@ export default {
   margin-right: 24px;
   z-index: 0;
 
+  .podcast-shownotes {
+    height: 100%;
+    padding: 20px 48px;
+    max-width: 640px;
+    display: flex;
+    flex-direction: column;
+
+    .shownotes-header {
+      font-size: 24px;
+      font-weight: 700;
+      margin-bottom: 20px;
+    }
+
+    .shownotes-body {
+      flex: 1;
+      font-size: 15px;
+      font-weight: 400;
+      line-height: 1.8;
+      overflow-y: auto;
+      padding-right: 16px;
+      opacity: 0.9;
+      user-select: text;
+    }
+  }
+
   .lyrics-container {
     height: 100%;
     display: flex;
@@ -1156,5 +1210,125 @@ export default {
 .slide-fade-leave-to {
   transform: translateX(27vh);
   opacity: 0;
+}
+.shownotes-listens {
+  font-size: 13px;
+  font-weight: 400;
+  opacity: 0.7;
+  margin-top: 8px;
+}
+.lyrics-page.podcast-mode {
+  box-sizing: border-box;
+  .lyrics-background,
+  .gradient-background {
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+  gap: clamp(24px, 4vw, 64px);
+  padding: 64px clamp(24px, 5vw, 80px) 32px;
+  .left-side {
+    flex: 0 1 420px;
+    min-width: 0;
+    margin: 0;
+    transform: none;
+    justify-content: center;
+    align-items: center;
+    > div {
+      width: 100%;
+    }
+    .controls,
+    .date {
+      max-width: 100%;
+    }
+  }
+  .cover img,
+  .cover .shadow {
+    width: min(100%, 44vh);
+    height: auto;
+    aspect-ratio: 1;
+  }
+  .cover .shadow {
+    width: min(100%, 44vh);
+    height: min(420px, 44vh);
+  }
+  .cover-container {
+    width: min(100%, 44vh);
+    margin: 0 auto;
+  }
+  .right-side {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
+    margin: 0;
+    z-index: 1;
+  }
+  .right-side .podcast-shownotes {
+    box-sizing: border-box;
+    height: 100%;
+    width: 100%;
+    max-width: 760px;
+    padding: 0;
+    margin: 0 auto;
+    min-height: 0;
+  }
+  .shownotes-header {
+    flex-shrink: 0;
+    padding-bottom: 16px;
+    border-bottom: 1px solid currentColor;
+  }
+  .right-side .podcast-shownotes .shownotes-body {
+    min-height: 0;
+    overflow: auto;
+    overflow-wrap: anywhere;
+    padding: 0 16px 32px 0;
+  }
+  .shownotes-body ::v-deep img {
+    max-width: 100%;
+    height: auto;
+  }
+  .shownotes-body ::v-deep pre {
+    white-space: pre-wrap;
+  }
+  .shownotes-body ::v-deep a {
+    color: inherit;
+    text-decoration: underline;
+  }
+  .shownotes-body ::v-deep p {
+    margin: 0 0 16px;
+  }
+  @media (max-width: 850px), (max-aspect-ratio: 10/9) {
+    flex-direction: column;
+    overflow-y: auto;
+    padding: 64px 24px 32px;
+    gap: 32px;
+    .left-side {
+      display: flex;
+      flex: none;
+      width: 100%;
+      max-width: 480px;
+      margin: 0 auto;
+    }
+    .cover img {
+      width: min(100%, 28vh);
+    }
+    .cover-container {
+      width: min(100%, 28vh);
+    }
+    .cover .shadow {
+      display: none;
+    }
+    .right-side {
+      flex: none;
+      width: 100%;
+    }
+    .right-side .podcast-shownotes {
+      height: auto;
+    }
+    .right-side .podcast-shownotes .shownotes-body {
+      overflow: visible;
+    }
+  }
 }
 </style>

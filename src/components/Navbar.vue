@@ -21,6 +21,11 @@
           >{{ $t('nav.explore') }}</router-link
         >
         <router-link
+          to="/podcast"
+          :class="{ active: $route.name && $route.name.startsWith('podcast') }"
+          >播客</router-link
+        >
+        <router-link
           to="/library"
           :class="{ active: $route.name === 'library' }"
           >{{ $t('nav.library') }}</router-link

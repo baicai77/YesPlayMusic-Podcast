@@ -74,9 +74,12 @@
           <div v-show="qrCodeSvg" class="qr-code-container">
             <img :src="qrCodeSvg" loading="lazy" />
           </div>
-          <div class="qr-code-info">
+          <div class="qr-code-info" role="status" aria-live="polite">
             {{ qrCodeInformation }}
           </div>
+          <button :disabled="processing" @click="getQrCodeKey"
+            >刷新二维码</button
+          >
         </div>
       </div>
       <div v-show="mode !== 'qrCode'" class="confirm">
@@ -116,7 +119,7 @@ import QRCode from 'qrcode';
 import md5 from 'crypto-js/md5';
 import NProgress from 'nprogress';
 import { mapMutations } from 'vuex';
-import { setCookies } from '@/utils/auth';
+import { setCookies, getCookie } from '@/utils/auth';
 import nativeAlert from '@/utils/nativeAlert';
 import {
   loginWithPhone,
@@ -140,6 +143,7 @@ export default {
       qrCodeKey: '',
       qrCodeSvg: '',
       qrCodeCheckInterval: null,
+      qrChecking: false,
       qrCodeInformation: '打开网易云音乐APP扫码登录',
     };
   },
@@ -214,85 +218,95 @@ export default {
           });
       }
     },
-    handleLoginResponse(data) {
-      if (!data) {
-        this.processing = false;
-        return;
-      }
-      if (data.code === 200) {
+    async handleLoginResponse(data) {
+      this.processing = true;
+      try {
+        if (data?.code !== 200)
+          throw new Error(data?.msg || data?.message || '登录失败，请重试');
         setCookies(data.cookie);
+        if (!getCookie('MUSIC_U'))
+          throw new Error('未收到账号登录凭证，请重新扫码');
         this.updateData({ key: 'loginMode', value: 'account' });
-        this.$store.dispatch('fetchUserProfile').then(() => {
-          this.$store.dispatch('fetchLikedPlaylist').then(() => {
-            this.$router.push({ path: '/library' });
-          });
+        await this.$store.dispatch('fetchUserProfile');
+        if (!this.$store.state.data.user?.userId)
+          throw new Error('获取账号资料失败，请刷新二维码重试');
+        await this.$store.dispatch('fetchLikedPlaylist').catch(() => {
+          this.$store.dispatch(
+            'showToast',
+            '登录成功，歌单暂未加载，可稍后重试'
+          );
         });
-      } else {
+        await this.$router.push({ path: '/library' });
+      } catch (error) {
+        this.qrCodeInformation = error.message || '登录失败，请刷新二维码重试';
+        this.$store.dispatch('showToast', this.qrCodeInformation);
+      } finally {
         this.processing = false;
-        nativeAlert(data.msg ?? data.message ?? '账号或密码错误，请检查');
       }
     },
-    getQrCodeKey() {
-      return loginQrCodeKey().then(result => {
-        if (result.code === 200) {
-          this.qrCodeKey = result.data.unikey;
-          QRCode.toString(
-            `https://music.163.com/login?codekey=${this.qrCodeKey}`,
-            {
-              width: 192,
-              margin: 0,
-              color: {
-                dark: '#335eea',
-                light: '#00000000',
-              },
-              type: 'svg',
-            }
-          )
-            .then(svg => {
-              this.qrCodeSvg = `data:image/svg+xml;utf8,${encodeURIComponent(
-                svg
-              )}`;
-            })
-            .catch(err => {
-              console.error(err);
-            })
-            .finally(() => {
-              NProgress.done();
-            });
-        }
-        this.checkQrCodeLogin();
-      });
+    async getQrCodeKey() {
+      clearInterval(this.qrCodeCheckInterval);
+      this.qrCodeKey = '';
+      this.qrCodeSvg = '';
+      this.qrCodeInformation = '正在生成二维码...';
+      try {
+        const result = await loginQrCodeKey();
+        if (result?.code !== 200 || !result.data?.unikey)
+          throw new Error('二维码生成失败，请点击刷新');
+        this.qrCodeKey = result.data.unikey;
+        const svg = await QRCode.toString(
+          `https://music.163.com/login?codekey=${this.qrCodeKey}`,
+          {
+            width: 192,
+            margin: 0,
+            color: { dark: '#335eea', light: '#00000000' },
+            type: 'svg',
+          }
+        );
+        this.qrCodeSvg = `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+        this.qrCodeInformation = '打开网易云音乐APP扫码，并在手机上确认登录';
+        if (this.mode === 'qrCode') this.checkQrCodeLogin();
+      } catch (error) {
+        this.qrCodeInformation = '二维码加载失败，请检查网络后点击刷新';
+      } finally {
+        NProgress.done();
+      }
     },
     checkQrCodeLogin() {
-      // 清除二维码检测
       clearInterval(this.qrCodeCheckInterval);
-      this.qrCodeCheckInterval = setInterval(() => {
-        if (this.qrCodeKey === '') return;
-        loginQrCodeCheck(this.qrCodeKey).then(result => {
-          if (result.code === 800) {
-            this.getQrCodeKey(); // 重新生成QrCode
-            this.qrCodeInformation = '二维码已失效，请重新扫码';
-          } else if (result.code === 802) {
-            this.qrCodeInformation = '扫描成功，请在手机上确认登录';
-          } else if (result.code === 801) {
-            this.qrCodeInformation = '打开网易云音乐APP扫码登录';
-          } else if (result.code === 803) {
+      this.qrCodeCheckInterval = setInterval(async () => {
+        if (!this.qrCodeKey || this.qrChecking || this.processing) return;
+        const key = this.qrCodeKey;
+        this.qrChecking = true;
+        try {
+          const result = await loginQrCodeCheck(key);
+          if (key !== this.qrCodeKey || this.mode !== 'qrCode') return;
+          const code = Number(result?.code);
+          if (code === 800) {
             clearInterval(this.qrCodeCheckInterval);
-            this.qrCodeInformation = '登录成功，请稍等...';
-            result.code = 200;
-            result.cookie = result.cookie.replaceAll(' HTTPOnly', '');
-            this.handleLoginResponse(result);
+            this.qrCodeInformation = '二维码已失效，请点击刷新后重新扫码';
+          } else if (code === 802) {
+            this.qrCodeInformation = '扫描成功，请在手机上确认登录';
+          } else if (code === 801) {
+            this.qrCodeInformation = '打开网易云音乐APP扫码登录';
+          } else if (code === 803) {
+            clearInterval(this.qrCodeCheckInterval);
+            this.qrCodeInformation = '已确认，正在获取账号资料...';
+            await this.handleLoginResponse({ ...result, code: 200 });
+          } else {
+            this.qrCodeInformation = '登录状态获取失败，请刷新二维码重试';
           }
-        });
-      }, 1000);
+        } catch (error) {
+          this.qrCodeInformation = '连接失败，正在重试；也可点击刷新二维码';
+        } finally {
+          this.qrChecking = false;
+        }
+      }, 1500);
     },
     changeMode(mode) {
       this.mode = mode;
-      if (mode === 'qrCode') {
-        this.checkQrCodeLogin();
-      } else {
-        clearInterval(this.qrCodeCheckInterval);
-      }
+      if (mode === 'qrCode') this.getQrCodeKey();
+      else clearInterval(this.qrCodeCheckInterval);
     },
   },
 };

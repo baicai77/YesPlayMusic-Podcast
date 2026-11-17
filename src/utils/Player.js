@@ -84,6 +84,9 @@ export default class {
     this._personalFMNextTrack = {
       id: 0,
     }; // 私人FM下一首歌曲信息（为了快速加载下一首）
+    this._playbackRate =
+      Number(localStorage.getItem('playerPlaybackRate')) || 1.0;
+    this._lastXyzProgressSync = 0;
 
     /**
      * The blob records for cleanup.
@@ -211,6 +214,30 @@ export default class {
   get isCurrentTrackLiked() {
     return store.state.liked.songs.includes(this.currentTrack.id);
   }
+  get playbackRate() {
+    return this._playbackRate || 1.0;
+  }
+  set playbackRate(val) {
+    if (![0.8, 1, 1.25, 1.5, 1.75, 2].includes(val)) return;
+    this._playbackRate = val;
+    if (this._howler) {
+      this._howler.rate(this.isPodcast ? val : 1);
+    }
+    localStorage.setItem('playerPlaybackRate', val);
+  }
+  get isPodcast() {
+    return (
+      this._currentTrack?.isPodcast ||
+      String(this._currentTrack?.id || '').startsWith('xyz_')
+    );
+  }
+  skipSeconds(delta) {
+    const target = Math.max(
+      0,
+      Math.min(this.currentTrackDuration, (this._progress || 0) + delta)
+    );
+    this.progress = target;
+  }
 
   _init() {
     this._loadSelfFromLocalStorage();
@@ -255,6 +282,17 @@ export default class {
       localStorage.setItem('playerCurrentTrackTime', this._progress);
       if (isCreateMpris) {
         ipcRenderer?.send('playerCurrentTrackTime', this._progress);
+      }
+      // 小宇宙播客进度静默同步（每 15 秒上报一次）
+      if (this.playing && this.isPodcast && this._currentTrack?.eid) {
+        const now = Date.now();
+        if (
+          !this._lastXyzProgressSync ||
+          now - this._lastXyzProgressSync > 15000
+        ) {
+          this._lastXyzProgressSync = now;
+          this._syncPodcastProgress();
+        }
       }
     }, 1000);
   }
@@ -304,6 +342,7 @@ export default class {
     if (firstTrackID !== 'first') this._shuffledList.unshift(firstTrackID);
   }
   async _scrobble(track, time, completed = false) {
+    if (track?.isPodcast) return;
     console.debug(
       `[debug][Player.js] scrobble track 👉 ${track.name} by ${track.ar[0].name} 👉 time:${time} completed: ${completed}`
     );
@@ -345,11 +384,31 @@ export default class {
       src: [source],
       html5: true,
       preload: true,
-      format: ['mp3', 'flac'],
+      format: ['mp3', 'flac', 'm4a', 'aac', 'ogg', 'wav'],
       onend: () => {
+        this._syncPodcastProgress();
         this._nextTrackCallback();
       },
     });
+    this._howler._xyzEid = this._currentTrack?.eid;
+    this._howler.rate(this.isPodcast ? this.playbackRate : 1);
+    if (this._currentTrack?.eid) {
+      const track = this._currentTrack;
+      const local = localStorage.getItem(`xyz_progress_${track.eid}`);
+      const resume =
+        Number(
+          track._preferCloudProgress
+            ? track.playbackProgress
+            : local ?? track.playbackProgress
+        ) || 0;
+      delete track._preferCloudProgress;
+      const audio = this._howler;
+      audio.once('load', () => {
+        if (this._howler !== audio) return;
+        const duration = audio.duration();
+        audio.seek(resume > 0 && resume < duration - 5 ? resume : 0);
+      });
+    }
     this._howler.on('loaderror', (_, errCode) => {
       // https://developer.mozilla.org/en-US/docs/Web/API/MediaError/code
       // code 3: MEDIA_ERR_DECODE
@@ -492,6 +551,9 @@ export default class {
     return this._getAudioSourceBlobURL(buffer);
   }
   _getAudioSource(track) {
+    if (track.isPodcast || String(track.id).startsWith('xyz_') || track.url) {
+      return Promise.resolve(track.url);
+    }
     return this._getAudioSourceFromCache(String(track.id))
       .then(source => {
         return source ?? this._getAudioSourceFromNetease(track);
@@ -505,10 +567,42 @@ export default class {
     autoplay = true,
     ifUnplayableThen = UNPLAYABLE_CONDITION.PLAY_NEXT_TRACK
   ) {
+    const request = (this._trackRequest || 0) + 1;
+    this._trackRequest = request;
+    if (this._currentTrack?.id !== id) this._syncPodcastProgress();
     if (autoplay && this._currentTrack.name) {
       this._scrobble(this.currentTrack, this._howler?.seek());
     }
+    if (String(id).startsWith('xyz_')) {
+      if (this._currentTrack?.id === id && this._currentTrack?.url) {
+        this._updateMediaSessionMetaData(this._currentTrack);
+        return this._replaceCurrentTrackAudio(
+          this._currentTrack,
+          autoplay,
+          false,
+          ifUnplayableThen
+        );
+      }
+      const eid = String(id).replace('xyz_', '');
+      const { xyzService } = require('@/xyz/client');
+      const { adaptEpisodeToTrack } = require('@/xyz/adapter');
+      return xyzService.getEpisodeDetail(eid).then(res => {
+        if (request !== this._trackRequest) return false;
+        const epData = res?.data || res;
+        const track = adaptEpisodeToTrack(epData?.episode || epData);
+        if (!track) throw new Error('单集详情不可用');
+        this._currentTrack = track;
+        this._updateMediaSessionMetaData(track);
+        return this._replaceCurrentTrackAudio(
+          track,
+          autoplay,
+          false,
+          ifUnplayableThen
+        );
+      });
+    }
     return getTrackDetail(id).then(data => {
+      if (request !== this._trackRequest) return false;
       const track = data.songs[0];
       this._currentTrack = track;
       this._updateMediaSessionMetaData(track);
@@ -529,7 +623,36 @@ export default class {
     isCacheNextTrack,
     ifUnplayableThen = UNPLAYABLE_CONDITION.PLAY_NEXT_TRACK
   ) {
-    return this._getAudioSource(track).then(source => {
+    const request = this._trackRequest;
+    return this._getAudioSource(track).then(async source => {
+      if (track.eid) {
+        const { xyzService, isXyzLoggedIn } = require('@/xyz/client');
+        if (isXyzLoggedIn()) {
+          try {
+            const { xyzList } = require('@/xyz/adapter');
+            const response = await xyzService.getPlaybackProgress([track.eid]);
+            const remote = xyzList(response).find(
+              item => item.eid === track.eid
+            );
+            const localTime =
+              Number(localStorage.getItem(`xyz_progress_time_${track.eid}`)) ||
+              0;
+            if (
+              remote &&
+              Number.isFinite(remote.progress) &&
+              remote.progress >= 0 &&
+              Date.parse(remote.playedAt) > localTime
+            ) {
+              track.playbackProgress = remote.progress;
+              track._preferCloudProgress = true;
+            }
+          } catch {
+            // A progress lookup must not block playback when the service is unavailable.
+          }
+        }
+      }
+      if (request !== this._trackRequest || track.id !== this.currentTrackID)
+        return false;
       if (source) {
         let replaced = false;
         if (track.id === this.currentTrackID) {
@@ -565,6 +688,7 @@ export default class {
       ? this._personalFMNextTrack?.id ?? 0
       : this._getNextTrack()[0];
     if (!nextTrackID) return;
+    if (String(nextTrackID).startsWith('xyz_')) return;
     if (this._personalFMTrack.id == nextTrackID) return;
     getTrackDetail(nextTrackID).then(data => {
       let track = data.songs[0];
@@ -668,7 +792,7 @@ export default class {
     if ('setPositionState' in navigator.mediaSession) {
       navigator.mediaSession.setPositionState({
         duration: ~~(this.currentTrack.dt / 1000),
-        playbackRate: 1.0,
+        playbackRate: this.isPodcast ? this.playbackRate : 1,
         position: this.seek(),
       });
     }
@@ -818,6 +942,7 @@ export default class {
   }
 
   pause() {
+    this._syncPodcastProgress();
     this._howler?.fade(this.volume, 0, PLAY_PAUSE_FADE_DURATION);
 
     this._howler?.once('fade', () => {
@@ -928,6 +1053,63 @@ export default class {
       let trackIDs = data.hotSongs.map(t => t.id);
       this.replacePlaylist(trackIDs, id, 'artist', trackID);
     });
+  }
+  playPodcastByID(pid, trackID = 'first') {
+    const { xyzService } = require('@/xyz/client');
+    const { adaptEpisodeToTrack } = require('@/xyz/adapter');
+    xyzService.getEpisodeList({ pid, limit: 100, order: 'desc' }).then(res => {
+      const episodes = res?.data || res || [];
+      const adaptedTracks = episodes.map(item => adaptEpisodeToTrack(item));
+      const trackIDs = adaptedTracks.map(t => t.id);
+      this.replacePlaylist(trackIDs, pid, 'podcast', trackID);
+    });
+  }
+  async playPodcastEpisode(episode, playlist = []) {
+    if (!episode?.eid) throw new Error('无效的播客单集');
+    this._syncPodcastProgress();
+    this._isPersonalFM = false;
+    this._shuffle = false;
+    this._reversed = false;
+    this._playNextList = [];
+    this._playlistSource = { type: 'podcast', id: episode.pid };
+    this._list = playlist.length ? playlist.map(e => e.id) : [episode.id];
+    this._current = Math.max(0, this._list.indexOf(episode.id));
+    if (!this._list.includes(episode.id)) this._list.unshift(episode.id);
+    this._currentTrack = episode;
+    this._enabled = true;
+    this._lastXyzProgressSync = 0;
+    return this._replaceCurrentTrack(episode.id);
+  }
+
+  _syncPodcastProgress() {
+    if (
+      !this._currentTrack?.eid ||
+      !this._howler ||
+      this._howler._xyzEid !== this._currentTrack.eid ||
+      (this._howler.state && this._howler.state() !== 'loaded')
+    )
+      return;
+    const { xyzService, isXyzLoggedIn } = require('@/xyz/client');
+    const progress = Number(this._howler.seek());
+    if (!Number.isFinite(progress)) return;
+    localStorage.setItem(
+      `xyz_progress_${this._currentTrack.eid}`,
+      String(progress)
+    );
+    localStorage.setItem(
+      `xyz_progress_time_${this._currentTrack.eid}`,
+      String(Date.now())
+    );
+    if (isXyzLoggedIn()) {
+      xyzService
+        .updatePlaybackProgress({
+          pid: this._currentTrack.pid,
+          eid: this._currentTrack.eid,
+          progress,
+          duration: this.currentTrackDuration,
+        })
+        .catch(() => {});
+    }
   }
   playTrackOnListByID(id, listName = 'default') {
     if (listName === 'default') {

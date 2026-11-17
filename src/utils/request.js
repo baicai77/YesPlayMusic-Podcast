@@ -6,12 +6,12 @@ let baseURL = '';
 // Web 和 Electron 跑在不同端口避免同时启动时冲突
 if (process.env.IS_ELECTRON) {
   if (process.env.NODE_ENV === 'production') {
-    baseURL = process.env.VUE_APP_ELECTRON_API_URL;
+    baseURL = process.env.VUE_APP_ELECTRON_API_URL || '/api';
   } else {
     baseURL = process.env.VUE_APP_ELECTRON_API_URL_DEV;
   }
 } else {
-  baseURL = process.env.VUE_APP_NETEASE_API_URL;
+  baseURL = process.env.VUE_APP_NETEASE_API_URL || '/api';
 }
 
 const service = axios.create({
@@ -93,6 +93,7 @@ service.interceptors.response.use(
         router.push({ name: 'login' });
       }
     }
+    return Promise.reject(error);
   }
 );
 
