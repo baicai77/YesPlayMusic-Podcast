@@ -1,0 +1,18 @@
+plugins { id 'com.android.application' version '8.7.3' }
+
+android {
+    namespace 'local.podcast.lab'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'local.podcast.lab'
+        minSdk 26
+        targetSdk 35
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+    }
+}
+
+dependencies {
+    androidTestImplementation 'androidx.test:runner:1.6.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+    androidTestImplementation 'com.squareup.okhttp3:okhttp:4.12.0'
+}

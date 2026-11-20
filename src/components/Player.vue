@@ -307,6 +307,10 @@ export default {
       this.player.playbackRate = nextRate;
     },
     goToAlbum() {
+      if (this.player.currentTrack.localPodcast) {
+        this.$router.push({ name: 'podcastHome', query: { tab: 'rss' } });
+        return;
+      }
       if (this.player.isPodcast) {
         const pid =
           this.player.currentTrack.pid || this.player.playlistSource?.id;

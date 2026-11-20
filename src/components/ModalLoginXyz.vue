@@ -124,9 +124,7 @@ import {
   xyzService,
   xyzErrorMessage,
   importXyzSession,
-  setXyzToken,
-  setXyzRefreshToken,
-  setXyzUser,
+  replaceXyzSession,
 } from '@/xyz/client';
 
 export default {
@@ -237,10 +235,12 @@ export default {
         });
 
         if (res?.tokens?.accessToken) {
-          setXyzToken(res.tokens.accessToken);
-          setXyzRefreshToken(res.tokens.refreshToken || '');
           const user = res.user || res.data?.user || { nickname: '小宇宙用户' };
-          setXyzUser(user);
+          replaceXyzSession(
+            res.tokens.accessToken,
+            res.tokens.refreshToken || '',
+            user
+          );
           this.code = '';
           this.$emit('login-success', user);
           this.close();

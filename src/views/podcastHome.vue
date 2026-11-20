@@ -42,6 +42,8 @@
       </button>
     </div>
 
+    <PublicPodcastFeeds v-if="currentTab === 'rss'" />
+
     <div v-if="errorMessage" class="empty-state" role="alert">
       {{ errorMessage }}
       <button class="action-btn" :disabled="loading" @click="loadTabData()"
@@ -340,6 +342,7 @@
 
 <script>
 import ModalLoginXyz from '@/components/ModalLoginXyz.vue';
+import PublicPodcastFeeds from '@/components/PublicPodcastFeeds.vue';
 import {
   xyzService,
   getXyzUser,
@@ -361,6 +364,7 @@ export default {
   name: 'PodcastHome',
   components: {
     ModalLoginXyz,
+    PublicPodcastFeeds,
   },
   data() {
     return {
@@ -373,6 +377,7 @@ export default {
         { id: 'rankings', name: '热门榜单' },
         { id: 'history', name: '收听历史' },
         { id: 'search', name: '搜索播客' },
+        { id: 'rss', name: '本地 RSS' },
       ],
       rankingTypes: [
         { id: 'HOT', name: '🔥 最热榜' },
@@ -398,7 +403,13 @@ export default {
       historyEpisodes: [],
     };
   },
+  watch: {
+    '$route.query.tab'(tab) {
+      if (tab === 'rss' && this.currentTab !== 'rss') this.switchTab('rss');
+    },
+  },
   created() {
+    if (this.$route.query.tab === 'rss') this.currentTab = 'rss';
     this.user = isXyzLoggedIn()
       ? getXyzUser() || { nickname: '小宇宙用户' }
       : null;
@@ -431,6 +442,7 @@ export default {
       this.errorMessage = '';
       this.loading = false;
       if (!append) this.loadMoreKey = null;
+      if (tab === 'rss') return;
       if (['subscriptions', 'history'].includes(tab) && !isXyzLoggedIn())
         return;
       if (tab === 'search' && !this.keyword.trim()) return;

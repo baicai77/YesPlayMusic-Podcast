@@ -2,6 +2,10 @@
 const assert = require('assert');
 const fs = require('fs');
 const vm = require('vm');
+const { createRequire } = require('module');
+const { upstreamRequestScope } = require('../src/xyz/requestScope');
+const apiRequire = createRequire(require.resolve('../src/xyz/api'));
+let transportOptions;
 let request;
 const transport = {};
 for (const method of ['get', 'post']) {
@@ -17,7 +21,15 @@ for (const method of ['get', 'post']) {
 }
 const moduleStub = { exports: {} };
 vm.runInNewContext(fs.readFileSync('src/xyz/api.js', 'utf8'), {
-  require: () => ({ create: () => transport }),
+  require: name =>
+    name === 'axios'
+      ? {
+          create: options => {
+            transportOptions = options;
+            return transport;
+          },
+        }
+      : apiRequire(name),
   module: moduleStub,
   console,
   Date,
@@ -30,14 +42,29 @@ const api = moduleStub.exports;
 function check(method, path) {
   assert.equal(request.method, method);
   assert.equal(request.url, `https://api.xiaoyuzhoufm.com${path}`);
+  assert.match(request.options.headers['User-Agent'], /^YesPlayMusic\//);
+  assert.equal(request.options.headers.Accept, 'application/json');
+  for (const header of ['OS', 'Model', 'Host', 'BundleID', 'Content-Type']) {
+    assert.ok(!(header in request.options.headers), header);
+  }
   assert.equal(request.options.headers['x-jike-access-token'], 'test-token');
 }
 async function main() {
+  assert.equal(transportOptions.timeout, 12000);
+  assert.equal(transportOptions.maxRedirects, 0);
+  assert.equal(transportOptions.httpsAgent.keepAlive, true);
   await api.getSubscriptions('test-token');
   check('post', '/v1/subscription/list');
   assert.equal(request.body.sortBy, 'subscribedAt');
   await api.getDiscovery('test-token');
   check('post', '/v1/discovery-feed/list');
+  const { token: cancelToken } = require('axios').CancelToken.source();
+  await upstreamRequestScope.run({ cancelToken }, () =>
+    api.getDiscovery('test-token')
+  );
+  assert.strictEqual(request.options.cancelToken, cancelToken);
+  await api.getDiscovery('test-token');
+  assert.equal(request.options.cancelToken, undefined);
   await api.getSubscriptionUpdates('test-token');
   check('post', '/v1/inbox/list');
   await api.getEpisodeList('test-token', { pid: 'p', order: 'asc' });

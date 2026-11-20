@@ -1,37 +1,26 @@
-const axios = require('axios').create({ timeout: 12000 });
+const https = require('https');
+const { desktopHeaders: getHeaders } = require('./requestProfile');
+
+const { upstreamRequestScope, upstreamTimeoutMs } = require('./requestScope');
+
+const transport = require('axios').create({
+  timeout: upstreamTimeoutMs,
+  maxRedirects: 0,
+  httpsAgent: new https.Agent({ keepAlive: true, maxFreeSockets: 8 }),
+});
+
+function withRequestSignal(options) {
+  const scope = upstreamRequestScope.getStore();
+  return scope ? { ...options, cancelToken: scope.cancelToken } : options;
+}
+
+const axios = {
+  get: (url, options) => transport.get(url, withRequestSignal(options)),
+  post: (url, body, options) =>
+    transport.post(url, body, withRequestSignal(options)),
+};
 
 const BASE_URL = 'https://api.xiaoyuzhoufm.com';
-
-function getHeaders(token = '') {
-  const now = new Date().toISOString();
-  const headers = {
-    Host: 'api.xiaoyuzhoufm.com',
-    'User-Agent': 'Xiaoyuzhou/2.57.1 (build:1576; iOS 17.4.1)',
-    Market: 'AppStore',
-    'App-BuildNo': '1576',
-    OS: 'ios',
-    Manufacturer: 'Apple',
-    BundleID: 'app.podcast.cosmos',
-    Connection: 'keep-alive',
-    'abtest-info': JSON.stringify({ old_user_discovery_feed: 'enable' }),
-    'Accept-Language': 'zh-Hans-CN;q=1.0, zh-Hant-HK;q=0.9',
-    Model: 'iPhone14,2',
-    'app-permissions': '4',
-    Accept: '*/*',
-    'App-Version': '2.57.1',
-    WifiConnected: 'true',
-    'OS-Version': '17.4.1',
-    'Local-Time': now,
-    Timezone: 'Asia/Shanghai',
-    'Content-Type': 'application/json',
-  };
-
-  if (token) {
-    headers['x-jike-access-token'] = token;
-  }
-
-  return headers;
-}
 
 /**
  * 发送短信验证码

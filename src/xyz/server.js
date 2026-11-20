@@ -1,8 +1,76 @@
 const express = require('express');
+const { CancelToken } = require('axios');
 const xyzApi = require('./api');
+const {
+  upstreamRequestScope,
+  upstreamTimeoutMs,
+  upstreamConcurrency,
+} = require('./requestScope');
+const { retryDeadline, retrySeconds } = require('./rateLimit');
+
+let cooldownUntil = 0;
+let activeRequests = 0;
+const queuedRequests = new Set();
+
+function rejectDuringCooldown(res) {
+  const wait = retrySeconds(cooldownUntil);
+  if (!wait) return false;
+  res.set('Retry-After', String(wait));
+  res.status(429).json({
+    code: 429,
+    error: { message: '小宇宙请求冷却中，请稍后重试' },
+  });
+  return true;
+}
+
+function drainQueue() {
+  while (activeRequests < upstreamConcurrency && queuedRequests.size) {
+    const start = queuedRequests.values().next().value;
+    queuedRequests.delete(start);
+    start();
+  }
+}
 
 const router = express.Router();
 router.use(express.json());
+router.use((req, res, next) => {
+  if (rejectDuringCooldown(res)) return;
+  const source = CancelToken.source();
+  const scope = { cancelToken: source.token, timedOut: false };
+  let active = false;
+  const start = () => {
+    if (res.destroyed || rejectDuringCooldown(res)) return;
+    active = true;
+    activeRequests++;
+    upstreamRequestScope.run(scope, next);
+  };
+  const cleanup = () => {
+    clearTimeout(timer);
+    queuedRequests.delete(start);
+    if (active) {
+      active = false;
+      activeRequests--;
+      drainQueue();
+    }
+  };
+  const timer = setTimeout(() => {
+    scope.timedOut = true;
+    source.cancel('Upstream deadline exceeded');
+    if (queuedRequests.delete(start) && !res.destroyed) {
+      res.status(504).json({
+        code: 504,
+        error: { message: '小宇宙请求排队超时，请稍后重试' },
+      });
+    }
+  }, upstreamTimeoutMs);
+  res.once('close', () => {
+    if (!res.writableEnded) source.cancel('Downstream disconnected');
+    cleanup();
+  });
+  res.once('finish', cleanup);
+  queuedRequests.add(start);
+  drainQueue();
+});
 
 function getToken(req) {
   return (
@@ -15,12 +83,33 @@ function getToken(req) {
 
 // 统一错误处理
 function handleResponse(promise, res) {
+  const scope = upstreamRequestScope.getStore();
   promise
-    .then(data => res.json({ code: 200, data }))
+    .then(data => {
+      if (!res.destroyed) res.json({ code: 200, data });
+    })
     .catch(err => {
-      const status = err.response?.status || err.status || 500;
-      const data = err.response?.data || { message: err.message };
-      res.status(status).json({ code: status, error: data });
+      const upstreamStatus = err.response?.status;
+      const timedOut =
+        scope?.timedOut || ['ECONNABORTED', 'ETIMEDOUT'].includes(err.code);
+      let status = upstreamStatus || err.status || (timedOut ? 504 : 502);
+      if (status >= 300 && status < 400) status = 502;
+      const retryAfter = err.response?.headers?.['retry-after'];
+      if (status === 429) {
+        cooldownUntil = Math.max(cooldownUntil, retryDeadline(retryAfter));
+      }
+      if (res.destroyed) return;
+      if (status === 429) {
+        res.set('Retry-After', String(retrySeconds(cooldownUntil)));
+      }
+      let error = err.response?.data || {
+        message: err.status ? err.message : '小宇宙服务请求失败',
+      };
+      if (status === 504) error = { message: '小宇宙服务响应超时，请稍后重试' };
+      if (status === 502) {
+        error = { message: '本地代理无法完成小宇宙请求，请稍后重试' };
+      }
+      res.status(status).json({ code: status, error });
     });
 }
 

@@ -2,6 +2,8 @@
 const assert = require('assert');
 const fs = require('fs');
 const vm = require('vm');
+const { createRequire } = require('module');
+const { resolve } = require('path');
 const babel = require('@babel/core');
 const storage = new Map();
 const localStorage = {
@@ -10,6 +12,7 @@ const localStorage = {
   removeItem: key => storage.delete(key),
 };
 function load(file, mocks = {}, extra = {}) {
+  const sourceRequire = createRequire(resolve(file));
   const code = babel.transformSync(fs.readFileSync(file, 'utf8'), {
     babelrc: false,
     configFile: false,
@@ -21,7 +24,7 @@ function load(file, mocks = {}, extra = {}) {
     {
       module,
       exports: module.exports,
-      require: name => mocks[name] || require(name),
+      require: name => mocks[name] || sourceRequire(name),
       localStorage,
       console,
       URL,
@@ -209,6 +212,7 @@ async function main() {
   assert.equal(adapter.xyzList({ data: { items: [1, 2] } }).length, 2);
   assert.equal(adapter.xyzCursor({ loadMoreKey: { id: 'next' } }).id, 'next');
   let responseError;
+  let prepareRequest;
   let refreshes = 0;
   let retries = 0;
   const client = config => {
@@ -216,7 +220,11 @@ async function main() {
     return Promise.resolve(config);
   };
   client.interceptors = {
-    request: { use() {} },
+    request: {
+      use(handler) {
+        prepareRequest = handler;
+      },
+    },
     response: {
       use(ok, error) {
         responseError = error;
@@ -243,7 +251,7 @@ async function main() {
     [1, 2, 3].map(() =>
       responseError({
         response: { status: 401 },
-        config: { url: '/subscription' },
+        config: prepareRequest({ url: '/subscription', headers: {} }),
       })
     )
   );
@@ -272,14 +280,144 @@ async function main() {
   session.logoutXyz();
   assert.equal(session.isXyzLoggedIn(), false);
   assert.equal(session.getXyzRefreshToken(), '');
+
+  // Cache, in-flight deduplication, cache invalidation & error messages
+  assert.match(session.xyzErrorMessage({ response: { status: 429 } }), /频繁/);
+  assert.match(session.xyzErrorMessage({ response: { status: 403 } }), /受限/);
+  assert.match(session.xyzErrorMessage({ code: 'ECONNABORTED' }), /超时/);
+  assert.match(session.xyzErrorMessage({ response: { status: 504 } }), /超时/);
+  assert.match(
+    session.xyzErrorMessage({
+      response: { status: 429, headers: { 'retry-after': '30' } },
+    }),
+    /等待 30 秒/
+  );
+  let discoveryCalls = 0;
+  client.post = async url => {
+    if (url === '/discovery') {
+      discoveryCalls++;
+      await new Promise(resolve => setTimeout(resolve, 5));
+      return { items: [{ id: discoveryCalls }] };
+    }
+    return {};
+  };
+  const [d1, d2] = await Promise.all([
+    session.xyzService.getDiscovery(),
+    session.xyzService.getDiscovery(),
+  ]);
+  assert.equal(discoveryCalls, 1, 'concurrent discovery calls must coalesce');
+  assert.deepEqual(d1, d2);
+  await session.xyzService.getDiscovery();
+  assert.equal(
+    discoveryCalls,
+    1,
+    'cached discovery must not refetch within TTL'
+  );
+  session.clearXyzCache();
+  await session.xyzService.getDiscovery();
+  assert.equal(discoveryCalls, 2, 'clearXyzCache must invalidate cache');
+  session.clearXyzCache();
+  const pendingResponses = [];
+  client.post = () => new Promise(resolve => pendingResponses.push(resolve));
+  const stale = session.xyzService.getDiscovery();
+  await Promise.resolve();
+  session.clearXyzCache();
+  const fresh = session.xyzService.getDiscovery();
+  await Promise.resolve();
+  pendingResponses[0]('stale');
+  await stale;
+  assert.strictEqual(session.xyzService.getDiscovery(), fresh);
+  pendingResponses[1]('fresh');
+  assert.equal(await fresh, 'fresh');
+  assert.equal(await session.xyzService.getDiscovery(), 'fresh');
+  let subscriptionCalls = 0;
+  client.post = async (url, data) => ({
+    page: ++subscriptionCalls,
+    limit: data?.limit ?? 25,
+  });
+  assert.equal(
+    (await session.xyzService.getSubscriptions({ limit: 10 })).limit,
+    10
+  );
+  assert.equal(
+    (await session.xyzService.getSubscriptions({ limit: 25 })).limit,
+    25
+  );
+  assert.equal((await session.xyzService.getSubscriptions()).page, 2);
+  const oldRequest = prepareRequest({ url: '/subscription', headers: {} });
+  session.replaceXyzSession('old-account', 'old-refresh', { uid: 'old' });
+  assert.equal((await session.xyzService.getSubscriptions()).page, 3);
+  await assert.rejects(
+    responseError({ response: { status: 401 }, config: oldRequest })
+  );
+  assert.equal(session.getXyzToken(), 'old-account');
+  let finishRefresh;
+  client.post = () =>
+    new Promise(resolve => {
+      finishRefresh = resolve;
+    });
+  const refreshing = responseError({
+    response: { status: 401 },
+    config: prepareRequest({ url: '/subscription', headers: {} }),
+  });
+  const staleRefresh = assert.rejects(refreshing, /登录状态已更改/);
+  session.replaceXyzSession('new-account', 'new-refresh', { uid: 'new' });
+  finishRefresh({ tokens: { accessToken: 'stale-token' } });
+  await staleRefresh;
+  assert.equal(session.getXyzToken(), 'new-account');
+  assert.equal(session.canSyncXyzProgress(), true);
+  await assert.rejects(
+    responseError({
+      response: { status: 403 },
+      config: prepareRequest({ url: '/playback_progress', headers: {} }),
+    })
+  );
+  assert.equal(session.canSyncXyzProgress(), false);
+  session.replaceXyzSession('verified-account', 'verified-refresh', {
+    uid: 'verified',
+  });
+  assert.equal(session.canSyncXyzProgress(), true);
+  let unexpectedRefreshes = 0;
+  client.post = async () => {
+    unexpectedRefreshes++;
+  };
+  const challenge = {
+    response: { status: 401, data: { error: 'captchaVerifyParam' } },
+    config: prepareRequest({ url: '/playback_progress_update', headers: {} }),
+  };
+  await assert.rejects(responseError(challenge), error => error === challenge);
+  assert.equal(unexpectedRefreshes, 0);
+  assert.equal(session.getXyzToken(), 'verified-account');
+  assert.equal(session.canSyncXyzProgress(), false);
   const mocks = {};
   const playerSource = fs.readFileSync('src/utils/Player.js', 'utf8');
   for (const match of playerSource.matchAll(/from '([^']+)'/g))
     mocks[match[1]] = {};
-  mocks['@/xyz/client'] = { xyzService: {}, isXyzLoggedIn: () => false };
+  let onAudioLoad;
+  let sought;
+  mocks.howler = {
+    Howler: { unload() {} },
+    Howl: class {
+      rate() {}
+      on() {}
+      once(event, callback) { if (event === 'load') onAudioLoad = callback; }
+      duration() { return 120.25; }
+      seek(value) { sought = value; }
+    },
+  };
+  mocks['@/xyz/client'] = { xyzService: {}, canSyncXyzProgress: () => false };
   const Player = load('src/utils/Player.js', mocks, {
     process: { env: {} },
   }).default;
+  const rssPlayer = Object.create(Player.prototype);
+  rssPlayer.setOutputDevice = () => {};
+  rssPlayer._currentTrack = { eid: 'rss:test', localPodcast: true, dt: 0 };
+  localStorage.setItem('xyz_progress_rss:test', '45');
+  rssPlayer._playAudioSource('https://example.test/audio.mp3', false);
+  assert.equal(rssPlayer.currentTrackDuration, 1);
+  onAudioLoad();
+  assert.equal(rssPlayer.currentTrackDuration, 121);
+  assert.equal(sought, 45);
   const player = Object.create(Player.prototype);
   player._currentTrack = track;
   player._howler = { _xyzEid: 'other', seek: () => 33 };
@@ -292,6 +430,40 @@ async function main() {
   player._howler._xyzEid = 'e1';
   player._syncPodcastProgress();
   assert.equal(localStorage.getItem('xyz_progress_e1'), '33');
+
+  let cloudSyncCalls = 0;
+  mocks['@/xyz/client'] = {
+    xyzService: {
+      updatePlaybackProgress: () => {
+        cloudSyncCalls++;
+        return cloudSyncCalls === 1
+          ? Promise.reject(new Error('offline'))
+          : Promise.resolve();
+      },
+    },
+    canSyncXyzProgress: () => true,
+    getXyzSessionVersion: session.getXyzSessionVersion,
+  };
+  player._syncPodcastProgress();
+  player._syncPodcastProgress();
+  assert.equal(
+    cloudSyncCalls,
+    1,
+    'duplicate cloud progress sync for same second must be skipped'
+  );
+  await new Promise(resolve => setImmediate(resolve));
+  player._syncPodcastProgress();
+  assert.equal(cloudSyncCalls, 2, 'same position must retry after failure');
+  await new Promise(resolve => setImmediate(resolve));
+  player._syncPodcastProgress();
+  assert.equal(cloudSyncCalls, 2, 'confirmed position must not be sent twice');
+  session.replaceXyzSession('third-account', '', { uid: 'third' });
+  player._syncPodcastProgress();
+  assert.equal(
+    cloudSyncCalls,
+    3,
+    'a different account must sync independently'
+  );
   player._currentTrack = { id: 123 };
   player._playlistSource = { type: 'podcast' };
   assert.equal(player.isPodcast, false, 'music must not inherit podcast mode');

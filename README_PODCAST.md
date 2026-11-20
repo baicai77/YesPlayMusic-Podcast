@@ -52,7 +52,7 @@ npm run electron:build-win
 
 ## 📂 项目新增与核心改造文件一览
 
-* `src/xyz/api.js`：基于 Axios 实现的小宇宙官方接口请求封装（携带 iOS 客户端专属请求头与 Access Token）。
+* `src/xyz/api.js` / `src/xyz/requestProfile.js`：桌面端上游请求与公共头封装，使用应用自己的标识，不发送手机机型或官方 App 标识。
 * `src/xyz/server.js`：Express 路由中间件，提供 `/xyz/*` 本地代理接口，解决跨域与鉴权。
 * `src/xyz/adapter.js`：数据模型转换层，将小宇宙 Podcast / Episode 映射为播放器通用的 Track / Playlist 规范。
 * `src/xyz/client.js`：前端小宇宙 SDK 与 Token/用户状态管理。
@@ -84,6 +84,16 @@ npm run electron:build-win
 - 修复节目名和封面适配、播客倍速影响音乐、随机队列干扰播客的问题。
 - 单集加载完成后恢复断点；播放中每 15 秒、暂停和切换时保存进度。未登录只保存本地进度，登录后尝试上报云端。
 - Show Notes 保留安全的基础排版、图片及 HTTP(S) 链接，过滤脚本、事件属性和危险协议。
+
+### 桌面请求与 Android 本地测试
+
+- 上游固定为小宇宙 HTTPS 地址，复用连接，12 秒总超时包含连接池排队；客户端断开时取消上游请求。不跟随重定向，不因网络错误自动重发短信或进度写入。已到达上游的写入不能撤回。
+- 上游限流时保留 `Retry-After`；超时单独提示。遇到人机验证或访问受限，调整请求头不能替代官方授权流程。
+- Android 测试场景使用自定义测试头和回环 HTTP 服务，不读取登录凭证、不接入生产代理。运行 `node tests/xyz-request-profile.cjs` 即可检查；桌面请求与未公开接口的兼容性仍需在获准的环境里手动验证。
+
+- 收到 `429` 后，代理共享冷却窗口，支持秒数和 HTTP 日期；缺少有效提示时等待 30 秒。窗口内不发送新的上游请求，不自动重放写入。收到 `403` 或人机验证后，本会话的云进度同步暂停，换会话后重新启用。
+- 在「播客 → 本地 RSS」添加发布者公开的 HTTPS RSS，或导入 `.rss` / `.xml` 文件。直连需要发布源允许跨域；不支持重定向和非 HTTPS 音频，每源导入最多 100 集。订阅与断点存本机，不涉及小宇宙账号或付费内容。
+- Electron 和 Android 的本地网络对照测试见 `tests/network-lab/README.md`。
 
 ### 使用及验证
 

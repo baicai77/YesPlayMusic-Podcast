@@ -196,6 +196,9 @@ export default class {
     return this._personalFMTrack;
   }
   get currentTrackDuration() {
+    if (this._currentTrack.localPodcast) {
+      return Math.max(1, Math.ceil((this._currentTrack.dt || 0) / 1000));
+    }
     const trackDuration = this._currentTrack.dt || 1000;
     let duration = ~~(trackDuration / 1000);
     return duration > 1 ? duration - 1 : duration;
@@ -404,8 +407,12 @@ export default class {
       delete track._preferCloudProgress;
       const audio = this._howler;
       audio.once('load', () => {
-        if (this._howler !== audio) return;
+        if (this._howler !== audio || this._currentTrack !== track) return;
         const duration = audio.duration();
+        if (track.localPodcast && Number.isFinite(duration) && duration > 0) {
+          track.dt = duration * 1000;
+          track.duration = duration;
+        }
         audio.seek(resume > 0 && resume < duration - 5 ? resume : 0);
       });
     }
@@ -573,6 +580,22 @@ export default class {
     if (autoplay && this._currentTrack.name) {
       this._scrobble(this.currentTrack, this._howler?.seek());
     }
+    if (String(id).startsWith('rss:')) {
+      const { findPublicEpisode } = require('@/xyz/rss');
+      const track =
+        this._currentTrack?.id === id
+          ? this._currentTrack
+          : findPublicEpisode(id);
+      if (!track) return Promise.resolve(false);
+      this._currentTrack = track;
+      this._updateMediaSessionMetaData(track);
+      return this._replaceCurrentTrackAudio(
+        track,
+        autoplay,
+        false,
+        ifUnplayableThen
+      );
+    }
     if (String(id).startsWith('xyz_')) {
       if (this._currentTrack?.id === id && this._currentTrack?.url) {
         this._updateMediaSessionMetaData(this._currentTrack);
@@ -626,8 +649,8 @@ export default class {
     const request = this._trackRequest;
     return this._getAudioSource(track).then(async source => {
       if (track.eid) {
-        const { xyzService, isXyzLoggedIn } = require('@/xyz/client');
-        if (isXyzLoggedIn()) {
+        const { xyzService, canSyncXyzProgress } = require('@/xyz/client');
+        if (!track.localPodcast && canSyncXyzProgress()) {
           try {
             const { xyzList } = require('@/xyz/adapter');
             const response = await xyzService.getPlaybackProgress([track.eid]);
@@ -688,7 +711,7 @@ export default class {
       ? this._personalFMNextTrack?.id ?? 0
       : this._getNextTrack()[0];
     if (!nextTrackID) return;
-    if (String(nextTrackID).startsWith('xyz_')) return;
+    if (/^(xyz_|rss:)/.test(String(nextTrackID))) return;
     if (this._personalFMTrack.id == nextTrackID) return;
     getTrackDetail(nextTrackID).then(data => {
       let track = data.songs[0];
@@ -1089,7 +1112,11 @@ export default class {
       (this._howler.state && this._howler.state() !== 'loaded')
     )
       return;
-    const { xyzService, isXyzLoggedIn } = require('@/xyz/client');
+    const {
+      xyzService,
+      canSyncXyzProgress,
+      getXyzSessionVersion,
+    } = require('@/xyz/client');
     const progress = Number(this._howler.seek());
     if (!Number.isFinite(progress)) return;
     localStorage.setItem(
@@ -1100,7 +1127,15 @@ export default class {
       `xyz_progress_time_${this._currentTrack.eid}`,
       String(Date.now())
     );
-    if (isXyzLoggedIn()) {
+    if (!this._currentTrack.localPodcast && canSyncXyzProgress()) {
+      const sessionVersion = getXyzSessionVersion();
+      const syncKey = `${sessionVersion}:${this._currentTrack.eid}:${Math.floor(
+        progress
+      )}`;
+      const pending =
+        this._pendingCloudSync || (this._pendingCloudSync = new Set());
+      if (this._lastCloudSyncedKey === syncKey || pending.has(syncKey)) return;
+      pending.add(syncKey);
       xyzService
         .updatePlaybackProgress({
           pid: this._currentTrack.pid,
@@ -1108,7 +1143,13 @@ export default class {
           progress,
           duration: this.currentTrackDuration,
         })
-        .catch(() => {});
+        .then(() => {
+          if (getXyzSessionVersion() === sessionVersion) {
+            this._lastCloudSyncedKey = syncKey;
+          }
+        })
+        .catch(() => {})
+        .finally(() => pending.delete(syncKey));
     }
   }
   playTrackOnListByID(id, listName = 'default') {
