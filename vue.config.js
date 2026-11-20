@@ -3,6 +3,15 @@ const path = require('path');
 function resolve(dir) {
   return path.join(__dirname, dir);
 }
+function hasEsbuildBinary() {
+  try {
+    const esbuild = require('esbuild');
+    esbuild.transformSync('', { loader: 'js' });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
 
 module.exports = {
   // 生产环境打包不输出 map
@@ -11,8 +20,8 @@ module.exports = {
     disableHostCheck: true,
     port: process.env.DEV_SERVER_PORT || 8080,
     before(app) {
-      const xyzServer = require('./src/xyz/server');
-      app.use('/xyz', xyzServer);
+      const podcastServer = require('./src/podcast/server');
+      app.use('/podcast-api', podcastServer);
     },
     proxy: {
       '^/api': {
@@ -67,15 +76,28 @@ module.exports = {
       .loader('node-loader')
       .end();
 
-    config.module
-      .rule('webpack4_es_fallback')
-      .test(/\.js$/)
-      .include.add(/node_modules/)
-      .end()
-      .use('esbuild-loader')
-      .loader('esbuild-loader')
-      .options({ target: 'es2015', format: 'cjs' })
-      .end();
+    if (hasEsbuildBinary()) {
+      config.module
+        .rule('webpack4_es_fallback')
+        .test(/\.js$/)
+        .include.add(/node_modules/)
+        .end()
+        .use('esbuild-loader')
+        .loader('esbuild-loader')
+        .options({ target: 'es2015', format: 'cjs' })
+        .end();
+    } else {
+      config.module
+        .rule('webpack4_es_fallback')
+        .test(/\.js$/)
+        .include.add(
+          /node_modules[\\/](plyr|@neteaseapireborn|music-metadata|strtok3|peek-readable|file-type|token-types)/
+        )
+        .end()
+        .use('babel-loader')
+        .loader('babel-loader')
+        .end();
+    }
 
     // LimitChunkCountPlugin 可以通过合并块来对块进行后期处理。用以解决 chunk 包太多的问题
     config.plugin('chunkPlugin').use(webpack.optimize.LimitChunkCountPlugin, [
@@ -176,9 +198,9 @@ module.exports = {
       // 主线程的配置文件
       chainWebpackMainProcess: config => {
         config.module
-          .rule('xyz-main-transpile')
+          .rule('podcast-main-transpile')
           .test(/\.js$/)
-          .include.add(resolve('src/xyz'))
+          .include.add(resolve('src/podcast'))
           .end()
           .use('esbuild-loader')
           .loader('esbuild-loader')

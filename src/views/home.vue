@@ -3,7 +3,7 @@
     <div v-if="loadError" role="alert" class="index-row">
       音乐内容加载失败，请确认本地 API 服务可用。
       <button @click="loadData">重试</button>
-      <router-link to="/podcast">前往小宇宙播客</router-link>
+      <router-link to="/podcast">前往 RSS 播客</router-link>
     </div>
     <div
       v-if="settings.showPlaylistsByAppleMusic !== false"

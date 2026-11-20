@@ -2,29 +2,22 @@
   <div class="podcast-page">
     <div class="header-section">
       <div class="title-area">
-        <h1>小宇宙播客</h1>
-        <div class="subtitle">发现好节目，接着上次听。</div>
+        <h1>播客</h1>
+        <div class="subtitle">
+          基于开放 RSS / OPML 标准，无需登录第三方账号，本地订阅与断点续听。
+        </div>
       </div>
 
-      <div class="account-badge">
-        <div v-if="user" class="logged-in">
-          <img
-            v-if="user.avatar && user.avatar.picture"
-            :src="user.avatar.picture.smallPicUrl || user.avatar.picture.picUrl"
-            class="user-avatar"
-          />
-          <div class="user-name">{{ user.nickname || '小宇宙用户' }}</div>
-          <button class="action-btn logout-btn" @click.stop="handleLogout">
-            退出
-          </button>
-        </div>
+      <div class="header-actions">
+        <button class="action-btn primary-action" @click="openRssModal('rss')">
+          <svg-icon icon-class="plus" />
+          <span>添加 RSS</span>
+        </button>
         <button
-          v-else
-          class="action-btn login-btn"
-          @click="showLoginModal = true"
+          class="action-btn secondary-action"
+          @click="openRssModal('opml')"
         >
-          <svg-icon icon-class="login" />
-          <span>登录小宇宙</span>
+          <span>OPML 导入/导出</span>
         </button>
       </div>
     </div>
@@ -39,220 +32,379 @@
         @click="switchTab(tab.id)"
       >
         {{ tab.name }}
+        <span
+          v-if="tab.id === 'subscriptions' && subscriptions.length > 0"
+          class="tab-count"
+          >{{ subscriptions.length }}</span
+        >
       </button>
     </div>
 
     <div v-if="errorMessage" class="empty-state" role="alert">
       {{ errorMessage }}
-      <button class="action-btn" :disabled="loading" @click="loadTabData()"
-        >重试</button
-      >
+      <button class="action-btn" :disabled="loading" @click="retryCurrentTab">
+        重试
+      </button>
     </div>
-    <!-- 精选推荐 -->
-    <div v-if="currentTab === 'discovery'" class="tab-content">
-      <div v-if="loading" class="loading-state">加载中...</div>
-      <div v-else>
-        <!-- 编辑精选单集 -->
-        <div v-if="discoveryEpisodes.length > 0" class="section">
-          <h2>今日精选单集</h2>
-          <div class="episodes-grid">
-            <div
-              v-for="ep in discoveryEpisodes"
-              :key="ep.id"
-              class="episode-card"
-              @click="playEpisode(ep)"
-            >
-              <img :src="ep.al.picUrl" class="ep-cover" loading="lazy" />
-              <div class="ep-info">
-                <div class="ep-title" :title="ep.name">{{ ep.name }}</div>
-                <div class="ep-podcast">{{ ep.ar[0].name }}</div>
-                <div class="ep-meta">
-                  <span>{{ formatDuration(ep.duration) }}</span>
-                  <span v-if="ep.playCount !== null">
-                    · {{ formatPlayCount(ep.playCount) }}</span
-                  >
-                  <span v-if="ep.pubDate"> · {{ formatDate(ep.pubDate) }}</span>
-                </div>
-              </div>
-              <button class="play-circle-btn" @click.stop="playEpisode(ep)">
-                <svg-icon icon-class="play" />
-              </button>
-            </div>
-          </div>
-        </div>
 
-        <!-- 推荐播客节目 -->
-        <div v-if="discoveryPodcasts.length > 0" class="section">
-          <h2>热门推荐节目</h2>
+    <!-- 我的订阅 -->
+    <div v-if="currentTab === 'subscriptions'" class="tab-content">
+      <div v-if="subscriptions.length === 0" class="empty-state">
+        <div class="empty-text">
+          还没有本地 RSS 播客订阅。你可以直接粘贴 RSS 链接、导入 OPML
+          文件，或在「热门榜单」「搜索播客」中一键订阅。
+        </div>
+        <div class="empty-actions">
+          <button
+            class="action-btn primary-action"
+            @click="openRssModal('rss')"
+          >
+            添加 RSS 链接
+          </button>
+          <button
+            class="action-btn secondary-action"
+            @click="openRssModal('opml')"
+          >
+            导入 OPML
+          </button>
+          <button
+            class="action-btn secondary-action"
+            @click="switchTab('charts')"
+          >
+            浏览热门榜单
+          </button>
+        </div>
+      </div>
+
+      <div v-else>
+        <div class="section">
+          <div class="section-header">
+            <h2>已订阅节目 ({{ subscriptions.length }})</h2>
+            <button
+              class="action-btn secondary-action"
+              :disabled="refreshingSubs"
+              @click="refreshAllSubscriptions"
+            >
+              {{ refreshingSubs ? refreshProgressText : '刷新全部 RSS' }}
+            </button>
+          </div>
           <div class="podcast-grid">
             <div
-              v-for="pod in discoveryPodcasts"
+              v-for="pod in subscriptions"
               :key="pod.pid"
               class="podcast-card"
-              @click="goToPodcast(pod.pid)"
+              @click="openPodcast(pod)"
             >
               <div class="cover-wrapper">
-                <img :src="pod.picUrl" class="pod-cover" loading="lazy" />
+                <img
+                  :src="pod.coverImgUrl || fallbackCover"
+                  class="pod-cover"
+                  loading="lazy"
+                />
                 <button
                   class="pod-play-btn"
-                  @click.stop="playPodcastFirstEpisode(pod.pid)"
+                  title="播放最新单集"
+                  @click.stop="playPodcastLatest(pod)"
                 >
                   <svg-icon icon-class="play" />
                 </button>
               </div>
-              <div class="pod-title" :title="pod.name">{{ pod.name }}</div>
-              <div class="pod-brief" :title="pod.brief">{{ pod.brief }}</div>
+              <div class="pod-title" :title="pod.title">{{ pod.title }}</div>
+              <div class="pod-brief" :title="pod.author || pod.feedUrl">
+                {{
+                  pod.episodeCount
+                    ? `${pod.episodeCount} 集${
+                        pod.author ? ` · ${pod.author}` : ''
+                      }`
+                    : pod.author || '标准 RSS 订阅'
+                }}
+              </div>
             </div>
           </div>
         </div>
-      </div>
-    </div>
 
-    <!-- 我的订阅 -->
-    <div v-else-if="currentTab === 'subscriptions'" class="tab-content">
-      <div v-if="!user" class="empty-state">
-        <div class="empty-text">登录小宇宙后即可查看你订阅的所有播客节目</div>
-        <button class="action-btn login-btn" @click="showLoginModal = true">
-          立即登录
-        </button>
-      </div>
-      <div v-else>
-        <div v-if="loading" class="loading-state">正在加载订阅...</div>
-        <div v-else-if="subscriptions.length === 0" class="empty-state">
-          暂无订阅节目，快去「精选推荐」或搜索发现好节目吧！
-        </div>
-        <div v-else class="podcast-grid">
-          <div
-            v-for="pod in subscriptions"
-            :key="pod.pid"
-            class="podcast-card"
-            @click="goToPodcast(pod.pid)"
-          >
-            <div class="cover-wrapper">
-              <img :src="pod.picUrl" class="pod-cover" loading="lazy" />
+        <div v-if="latestSubscribedEpisodes.length > 0" class="section">
+          <h2>订阅最新更新</h2>
+          <div class="episodes-grid">
+            <div
+              v-for="ep in latestSubscribedEpisodes"
+              :key="ep.id"
+              class="episode-card"
+              @click="playEpisodeItem(ep)"
+            >
+              <img
+                :src="ep.coverImgUrl || fallbackCover"
+                class="ep-cover"
+                loading="lazy"
+              />
+              <div class="ep-info">
+                <div class="ep-title" :title="ep.title">{{ ep.title }}</div>
+                <div class="ep-podcast">{{ ep.podcastTitle }}</div>
+                <div class="ep-meta">
+                  <span>{{ formatShortDuration(ep.duration) }}</span>
+                  <span v-if="ep.pubDate">
+                    · {{ formatDateShort(ep.pubDate) }}</span
+                  >
+                </div>
+              </div>
               <button
-                class="pod-play-btn"
-                @click.stop="playPodcastFirstEpisode(pod.pid)"
+                class="play-circle-btn"
+                title="播放"
+                @click.stop="playEpisodeItem(ep)"
               >
                 <svg-icon icon-class="play" />
               </button>
             </div>
-            <div class="pod-title" :title="pod.name">{{ pod.name }}</div>
-            <div class="pod-brief">
-              {{ pod.trackCount ? `${pod.trackCount} 集` : pod.brief }}
-            </div>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- 热门榜单 -->
-    <div v-else-if="currentTab === 'rankings'" class="tab-content">
+    <!-- 热门榜单（Apple Podcasts 公开 RSS 榜） -->
+    <div v-else-if="currentTab === 'charts'" class="tab-content">
       <div class="ranking-heading">
         <div>
-          <h2>{{ rankingTitle || '热门榜单' }}</h2>
-          <p>{{ rankingInformation || '按热度发现值得收听的单集' }}</p>
-          <span v-if="rankingDate" class="ranking-date"
-            >{{ formatDate(rankingDate) }} 更新 ·
-            {{ rankingPodcasts.length }} 个单集</span
-          >
+          <h2>{{ chartTitle || '热门播客榜' }}</h2>
+          <p>
+            来自 Apple Podcasts 公开播客目录，自动关联标准 RSS
+            源，无需登录即可直接订阅与收听。
+          </p>
+          <span v-if="chartUpdated" class="ranking-date">
+            {{ formatDateShort(chartUpdated) }} 更新 ·
+            {{ chartItems.length }} 档节目
+          </span>
         </div>
-        <div class="ranking-selector" aria-label="榜单类型">
-          <button
-            v-for="r in rankingTypes"
-            :key="r.id"
-            class="rank-pill"
-            :class="{ active: currentRankType === r.id }"
-            :aria-pressed="currentRankType === r.id"
-            @click="changeRankingType(r.id)"
-            >{{ r.name }}</button
+
+        <div class="ranking-controls">
+          <select
+            v-model="chartCountry"
+            class="region-select"
+            aria-label="榜单地区"
+            @change="loadCharts()"
           >
+            <option v-for="c in countries" :key="c.code" :value="c.code">
+              {{ c.name }}
+            </option>
+          </select>
         </div>
       </div>
-      <div v-if="loading" class="loading-state" role="status"
-        >正在加载榜单...</div
-      >
-      <div
-        v-else-if="!rankingPodcasts.length && !errorMessage"
-        class="empty-state"
-        >榜单暂时没有内容，请稍后重试。</div
-      >
-      <div v-else class="ranking-list">
+
+      <div class="genre-pills" role="tablist" aria-label="播客分类">
         <button
-          v-for="(pod, index) in rankingPodcasts"
-          :key="pod.id"
+          v-for="g in genres"
+          :key="g.id"
+          class="rank-pill"
+          :class="{ active: chartGenre === g.id }"
+          @click="changeChartGenre(g.id)"
+        >
+          {{ g.name }}
+        </button>
+      </div>
+
+      <div v-if="loading" class="loading-state" role="status">
+        正在加载公开播客榜单...
+      </div>
+      <div v-else-if="!chartItems.length && !errorMessage" class="empty-state">
+        暂时没有获取到榜单内容，请切换地区或稍后重试。
+      </div>
+      <div v-else class="ranking-list">
+        <div
+          v-for="(pod, index) in chartItems"
+          :key="pod.pid || pod.itunesId"
           class="ranking-row"
-          :class="{
-            'top-three': index < 3,
-            'is-current': $store.state.player.currentTrack.id === pod.id,
-          }"
-          @click="pod.eid ? playEpisode(pod) : goToPodcast(pod.pid)"
+          :class="{ 'top-three': index < 3 }"
+          @click="openPodcast(pod)"
         >
           <span class="ranking-number">{{
             String(index + 1).padStart(2, '0')
           }}</span>
           <img
-            :src="pod.eid ? pod.al.picUrl : pod.picUrl"
+            :src="pod.coverImgUrl || fallbackCover"
             alt=""
             class="ranking-cover"
             loading="lazy"
           />
           <span class="ranking-copy">
-            <span class="ranking-title" :title="pod.name">{{ pod.name }}</span>
-            <span class="ranking-podcast">{{
-              pod.eid ? pod.ar[0].name : pod.brief
+            <span class="ranking-title" :title="pod.title">{{
+              pod.title
             }}</span>
-            <span v-if="pod.eid" class="ranking-duration"
-              >{{ formatDuration(pod.duration)
-              }}<template v-if="pod.playCount !== null">
-                · {{ formatPlayCount(pod.playCount) }}</template
-              ></span
-            >
+            <span class="ranking-podcast">{{ pod.author || '播客主播' }}</span>
+            <span class="ranking-duration">
+              <template v-if="pod.categories && pod.categories.length">{{
+                pod.categories[0]
+              }}</template>
+              <template v-if="pod.episodeCount">
+                · {{ pod.episodeCount }} 集</template
+              >
+            </span>
           </span>
-          <span
-            class="ranking-play"
-            :aria-label="pod.eid ? '播放单集' : '查看节目'"
-            ><svg-icon icon-class="play"
-          /></span>
-        </button>
+          <button
+            class="sub-pill-btn"
+            :class="{ subscribed: isPodSubscribed(pod) }"
+            :disabled="!pod.feedUrl && !pod.itunesId"
+            @click.stop="toggleSubscribeFromList(pod)"
+          >
+            {{ isPodSubscribed(pod) ? '已订阅' : '+ 订阅' }}
+          </button>
+        </div>
       </div>
     </div>
 
-    <!-- 收听历史 -->
-    <div v-else-if="currentTab === 'history'" class="tab-content">
-      <div v-if="!user" class="empty-state">
-        <div class="empty-text">登录后可同步你在手机端的播客收听记录与进度</div>
-        <button class="action-btn login-btn" @click="showLoginModal = true">
-          立即登录
+    <!-- 搜索播客 -->
+    <div v-else-if="currentTab === 'search'" class="tab-content">
+      <form class="search-form" @submit.prevent="performSearch">
+        <input
+          id="podcast-search"
+          v-model="keyword"
+          required
+          maxlength="300"
+          placeholder="输入播客/单集关键词，或直接粘贴 RSS 链接"
+        />
+        <select v-model="searchCountry" aria-label="搜索地区">
+          <option v-for="c in countries" :key="c.code" :value="c.code">
+            {{ c.name }}
+          </option>
+        </select>
+        <select
+          v-model="searchEntity"
+          aria-label="搜索类型"
+          @change="
+            searchResults = [];
+            searched = false;
+          "
+        >
+          <option value="podcast">节目</option>
+          <option value="podcastEpisode">单集</option>
+        </select>
+        <button
+          class="action-btn primary-action"
+          :disabled="loading || !keyword.trim()"
+        >
+          搜索
         </button>
+      </form>
+
+      <div v-if="loading" class="loading-state" role="status">搜索中...</div>
+      <div v-else-if="searched && !searchResults.length" class="empty-state">
+        没有找到匹配的公开播客，试试更换关键词或地区，或点击右上角「添加
+        RSS」直接输入订阅源。
+      </div>
+      <div v-else-if="searchEntity === 'podcast'" class="search-results">
+        <div
+          v-for="item in searchResults"
+          :key="item.pid"
+          class="search-result"
+          @click="openPodcast(item)"
+        >
+          <img
+            :src="item.coverImgUrl || fallbackCover"
+            :alt="item.title"
+            loading="lazy"
+          />
+          <div class="search-copy">
+            <div class="search-title">{{ item.title }}</div>
+            <div class="search-sub">
+              {{ item.author || '播客' }}
+              <template v-if="item.episodeCount">
+                · {{ item.episodeCount }} 集</template
+              >
+              <template v-if="item.categories && item.categories.length">
+                · {{ item.categories[0] }}</template
+              >
+            </div>
+          </div>
+          <button
+            class="sub-pill-btn"
+            :class="{ subscribed: isPodSubscribed(item) }"
+            @click.stop="toggleSubscribeFromList(item)"
+          >
+            {{ isPodSubscribed(item) ? '已订阅' : '+ 订阅' }}
+          </button>
+        </div>
+      </div>
+      <div v-else class="episodes-grid">
+        <div
+          v-for="ep in searchResults"
+          :key="ep.eid"
+          class="episode-card"
+          @click="playEpisodeItem(ep)"
+        >
+          <img
+            :src="ep.coverImgUrl || fallbackCover"
+            class="ep-cover"
+            loading="lazy"
+          />
+          <div class="ep-info">
+            <div class="ep-title" :title="ep.title">{{ ep.title }}</div>
+            <div class="ep-podcast">{{ ep.podcastTitle }}</div>
+            <div class="ep-meta">
+              <span>{{ formatShortDuration(ep.duration) }}</span>
+              <span v-if="ep.pubDate">
+                · {{ formatDateShort(ep.pubDate) }}</span
+              >
+            </div>
+          </div>
+          <button
+            class="play-circle-btn"
+            title="播放"
+            @click.stop="playEpisodeItem(ep)"
+          >
+            <svg-icon icon-class="play" />
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 本地收听历史 -->
+    <div v-else-if="currentTab === 'history'" class="tab-content">
+      <div v-if="historyEpisodes.length === 0" class="empty-state">
+        暂无本地收听历史，开始播放任意播客单集后将自动记录断点进度。
       </div>
       <div v-else>
-        <div v-if="loading" class="loading-state">加载收听历史...</div>
-        <div v-else-if="historyEpisodes.length === 0" class="empty-state">
-          暂无收听历史
+        <div class="section-header">
+          <h2>最近收听 ({{ historyEpisodes.length }})</h2>
+          <button
+            class="action-btn secondary-action"
+            @click="handleClearHistory"
+          >
+            清空历史
+          </button>
         </div>
-        <div v-else class="episodes-grid">
+        <div class="episodes-grid">
           <div
             v-for="ep in historyEpisodes"
-            :key="ep.id"
+            :key="ep.eid"
             class="episode-card"
-            @click="playEpisode(ep)"
+            @click="playEpisodeItem(ep)"
           >
-            <img :src="ep.al.picUrl" class="ep-cover" loading="lazy" />
+            <img
+              :src="ep.coverImgUrl || fallbackCover"
+              class="ep-cover"
+              loading="lazy"
+            />
             <div class="ep-info">
-              <div class="ep-title" :title="ep.name">{{ ep.name }}</div>
-              <div class="ep-podcast">{{ ep.ar[0].name }}</div>
+              <div class="ep-title" :title="ep.title">{{ ep.title }}</div>
+              <div class="ep-podcast">{{ ep.podcastTitle }}</div>
               <div class="ep-meta">
-                <span>{{ formatDuration(ep.duration) }}</span>
-                <span v-if="ep.playCount !== null">
-                  · {{ formatPlayCount(ep.playCount) }}</span
-                >
-                <span v-if="ep.playbackProgress">
-                  · 已听 {{ Math.floor(ep.playbackProgress / 60) }} 分钟</span
-                >
+                <span>{{ formatShortDuration(ep.duration) }}</span>
+                <span v-if="ep.completed"> · 已播完</span>
+                <span v-else-if="ep.playbackProgress > 0">
+                  · 已听 {{ Math.floor(ep.playbackProgress / 60) }} 分钟
+                </span>
               </div>
             </div>
-            <button class="play-circle-btn" @click.stop="playEpisode(ep)">
+            <button
+              class="remove-history-btn"
+              title="从历史移除"
+              @click.stop="handleRemoveHistory(ep.eid)"
+            >
+              <svg-icon icon-class="x" />
+            </button>
+            <button
+              class="play-circle-btn"
+              title="继续播放"
+              @click.stop="playEpisodeItem(ep)"
+            >
               <svg-icon icon-class="play" />
             </button>
           </div>
@@ -260,286 +412,347 @@
       </div>
     </div>
 
-    <div v-else-if="currentTab === 'search'" class="tab-content">
-      <form class="search-form" @submit.prevent="loadTabData()">
-        <label for="podcast-search">搜索节目或单集</label>
-        <input
-          id="podcast-search"
-          v-model="keyword"
-          required
-          maxlength="100"
-          placeholder="输入播客或单集关键词"
-        />
-        <select
-          v-model="searchType"
-          aria-label="搜索类型"
-          @change="
-            searchResults = [];
-            searched = false;
-          "
-        >
-          <option value="PODCAST">节目</option>
-          <option value="EPISODE">单集</option>
-        </select>
-        <button
-          class="action-btn login-btn"
-          :disabled="loading || !keyword.trim()"
-          >搜索</button
-        >
-      </form>
-      <div v-if="loading" class="loading-state" role="status">搜索中...</div>
-      <div v-else-if="searched && !searchResults.length" class="empty-state"
-        >没有找到结果，试试其他关键词</div
-      >
-      <div v-else class="search-results">
-        <button
-          v-for="item in searchResults"
-          :key="item.id"
-          class="search-result"
-          @click="
-            item.isPodcast && item.eid
-              ? playEpisode(item)
-              : goToPodcast(item.pid)
-          "
-        >
-          <img
-            :src="item.coverImgUrl || item.al.picUrl"
-            :alt="item.name"
-            loading="lazy"
-          />
-          <span>{{ item.name }}</span>
-          <span>{{ item.eid ? '播放单集' : '查看节目' }}</span>
-        </button>
-      </div>
-    </div>
-    <button
-      v-if="loadMoreKey"
-      class="action-btn"
-      :disabled="loading"
-      @click="loadTabData(true)"
-      >{{ loading ? '加载中...' : '加载更多' }}</button
-    >
-    <p
-      v-if="
-        currentTab === 'discovery' &&
-        !loading &&
-        !errorMessage &&
-        !discoveryEpisodes.length &&
-        !discoveryPodcasts.length
-      "
-      class="empty-state"
-      >暂无推荐内容，可尝试登录或搜索节目</p
-    >
-    <!-- 小宇宙登录弹窗 -->
-    <ModalLoginXyz
-      :show.sync="showLoginModal"
-      @login-success="handleLoginSuccess"
+    <ModalAddRss
+      :show.sync="showRssModal"
+      :initial-mode="rssModalMode"
+      :initial-url="rssModalInitialUrl"
+      @subscribed="handleRssSubscribed"
+      @imported="handleOpmlImported"
     />
   </div>
 </template>
 
 <script>
-import ModalLoginXyz from '@/components/ModalLoginXyz.vue';
-import {
-  xyzService,
-  getXyzUser,
-  logoutXyz,
-  isXyzLoggedIn,
-  xyzErrorMessage,
-} from '@/xyz/client';
+import ModalAddRss from '@/components/ModalAddRss.vue';
+import { podcastApi, podcastErrorMessage } from '@/podcast/client';
 import {
   adaptEpisodeToTrack,
-  adaptPodcastToPlaylist,
-  adaptDiscovery,
-  adaptRanking,
-  formatPlayCount,
-  xyzList,
-  xyzCursor,
-} from '@/xyz/adapter';
+  formatShortDuration,
+  formatDateShort,
+  FALLBACK_COVER,
+} from '@/podcast/adapter';
+import {
+  getSubscriptions,
+  isSubscribed,
+  subscribePodcast,
+  unsubscribePodcast,
+  registerFeedUrl,
+  getListeningHistory,
+  removeHistoryItem,
+  clearListeningHistory,
+  mergeLatestEpisodes,
+  getLatestSubscribedEpisodes,
+} from '@/podcast/storage';
+
+const COUNTRIES = [
+  { code: 'CN', name: '中国大陆' },
+  { code: 'TW', name: '中国台湾' },
+  { code: 'HK', name: '中国香港' },
+  { code: 'US', name: '美国' },
+  { code: 'JP', name: '日本' },
+];
+
+const GENRES = [
+  { id: '', name: '总榜' },
+  { id: '1324', name: '社会与文化' },
+  { id: '1321', name: '商业' },
+  { id: '1318', name: '科技' },
+  { id: '1301', name: '艺术' },
+  { id: '1303', name: '喜剧' },
+  { id: '1487', name: '历史' },
+  { id: '1489', name: '新闻' },
+  { id: '1304', name: '教育' },
+];
 
 export default {
   name: 'PodcastHome',
   components: {
-    ModalLoginXyz,
+    ModalAddRss,
   },
   data() {
     return {
-      user: null,
-      showLoginModal: false,
-      currentTab: 'discovery',
+      fallbackCover: FALLBACK_COVER,
+      countries: COUNTRIES,
+      genres: GENRES,
+      currentTab: 'charts',
       tabs: [
-        { id: 'discovery', name: '精选推荐' },
         { id: 'subscriptions', name: '我的订阅' },
-        { id: 'rankings', name: '热门榜单' },
-        { id: 'history', name: '收听历史' },
+        { id: 'charts', name: '热门榜单' },
         { id: 'search', name: '搜索播客' },
+        { id: 'history', name: '收听历史' },
       ],
-      rankingTypes: [
-        { id: 'HOT', name: '🔥 最热榜' },
-        { id: 'NEW', name: '新星榜' },
-        { id: 'ROCK', name: '锋芒榜' },
-      ],
-      currentRankType: 'HOT',
+      showRssModal: false,
+      rssModalMode: 'rss',
+      rssModalInitialUrl: '',
       loading: false,
       errorMessage: '',
       requestId: 0,
-      loadMoreKey: null,
+      subscriptions: [],
+      latestSubscribedEpisodes: [],
+      refreshingSubs: false,
+      refreshProgressText: '刷新中...',
+      chartCountry: 'CN',
+      chartGenre: '',
+      chartTitle: '',
+      chartUpdated: '',
+      chartItems: [],
       keyword: '',
-      searchType: 'PODCAST',
+      searchCountry: 'CN',
+      searchEntity: 'podcast',
       searched: false,
       searchResults: [],
-      discoveryEpisodes: [],
-      discoveryPodcasts: [],
-      subscriptions: [],
-      rankingPodcasts: [],
-      rankingTitle: '',
-      rankingInformation: '',
-      rankingDate: '',
       historyEpisodes: [],
     };
   },
   created() {
-    this.user = isXyzLoggedIn()
-      ? getXyzUser() || { nickname: '小宇宙用户' }
-      : null;
-    this.loadTabData();
+    this.reloadLocalState();
+    this.currentTab =
+      this.subscriptions.length > 0 ? 'subscriptions' : 'charts';
+    if (this.currentTab === 'charts') {
+      this.loadCharts();
+    }
+  },
+  activated() {
+    this.reloadLocalState();
   },
   methods: {
-    formatPlayCount,
-    handleLoginSuccess(user) {
-      this.user = user;
-      this.loadTabData();
+    formatShortDuration,
+    formatDateShort,
+    reloadLocalState() {
+      this.subscriptions = getSubscriptions();
+      this.latestSubscribedEpisodes = getLatestSubscribedEpisodes();
+      this.historyEpisodes = getListeningHistory();
     },
-    handleLogout() {
-      logoutXyz();
-      this.user = null;
-      this.subscriptions = [];
-      this.historyEpisodes = [];
-      this.loadTabData();
+    openRssModal(mode = 'rss', initialUrl = '') {
+      this.rssModalMode = mode;
+      this.rssModalInitialUrl = initialUrl;
+      this.showRssModal = true;
     },
     switchTab(tabId) {
       this.currentTab = tabId;
-      this.loadTabData();
-    },
-    changeRankingType(type) {
-      this.currentRankType = type;
-      this.loadTabData();
-    },
-    async loadTabData(append = false) {
-      const request = ++this.requestId;
-      const tab = this.currentTab;
       this.errorMessage = '';
-      this.loading = false;
-      if (!append) this.loadMoreKey = null;
-      if (['subscriptions', 'history'].includes(tab) && !isXyzLoggedIn())
-        return;
-      if (tab === 'search' && !this.keyword.trim()) return;
+      if (tabId === 'subscriptions' || tabId === 'history') {
+        this.reloadLocalState();
+      } else if (tabId === 'charts' && this.chartItems.length === 0) {
+        this.loadCharts();
+      }
+    },
+    retryCurrentTab() {
+      if (this.currentTab === 'charts') this.loadCharts(true);
+      else if (this.currentTab === 'search') this.performSearch();
+      else if (this.currentTab === 'subscriptions')
+        this.refreshAllSubscriptions();
+    },
+    changeChartGenre(genreId) {
+      this.chartGenre = genreId;
+      this.loadCharts();
+    },
+    async loadCharts(forceRefresh = false) {
+      const request = ++this.requestId;
       this.loading = true;
+      this.errorMessage = '';
       try {
-        const pagination = append ? { loadMoreKey: this.loadMoreKey } : {};
-        let response;
-        if (tab === 'discovery') response = await xyzService.getDiscovery();
-        if (tab === 'subscriptions')
-          response = await xyzService.getSubscriptions(pagination);
-        if (tab === 'rankings')
-          response = await xyzService.getTopList(this.currentRankType);
-        if (tab === 'history')
-          response = await xyzService.getHistory(pagination);
-        if (tab === 'search')
-          response = await xyzService.search({
-            keyword: this.keyword.trim(),
-            type: this.searchType,
-          });
+        const res = await podcastApi.getTopCharts({
+          country: this.chartCountry,
+          genre: this.chartGenre,
+          limit: 30,
+          forceRefresh,
+        });
         if (request !== this.requestId) return;
-        const list = xyzList(response);
-        const podcasts = items =>
-          items
-            .map(item => adaptPodcastToPlaylist(item.podcast || item))
-            .filter(Boolean);
-        const episodes = items =>
-          items
-            .map(item =>
-              adaptEpisodeToTrack(item.episode || item, item.podcast)
-            )
-            .filter(Boolean);
-        if (tab === 'discovery') {
-          const discovery = adaptDiscovery(response);
-          this.discoveryEpisodes = discovery.episodes;
-          this.discoveryPodcasts = discovery.podcasts;
-        }
-        if (tab === 'subscriptions')
-          this.subscriptions = append
-            ? [...this.subscriptions, ...podcasts(list)]
-            : podcasts(list);
-        if (tab === 'rankings') {
-          this.rankingPodcasts = adaptRanking(response);
-          const metadata = response?.data || response || {};
-          this.rankingTitle = metadata.title || '热门榜单';
-          this.rankingInformation = metadata.information || '';
-          this.rankingDate = metadata.publishDate || '';
-        }
-        if (tab === 'history')
-          this.historyEpisodes = append
-            ? [...this.historyEpisodes, ...episodes(list)]
-            : episodes(list);
-        if (tab === 'search') {
-          this.searchResults =
-            this.searchType === 'PODCAST' ? podcasts(list) : episodes(list);
-          this.searched = true;
-        }
-        this.loadMoreKey = ['subscriptions', 'history'].includes(tab)
-          ? xyzCursor(response)
-          : null;
-      } catch (error) {
+        this.chartTitle = res.title || '热门播客榜';
+        this.chartUpdated = res.updated || '';
+        this.chartItems = Array.isArray(res.items) ? res.items : [];
+      } catch (err) {
         if (request === this.requestId) {
-          this.errorMessage = xyzErrorMessage(error);
-          if (!isXyzLoggedIn()) this.user = null;
+          this.errorMessage = podcastErrorMessage(err);
         }
       } finally {
         if (request === this.requestId) this.loading = false;
       }
     },
-    goToPodcast(pid) {
-      this.$router.push({ name: 'podcast', params: { id: pid } });
-    },
-    async playEpisode(ep) {
+    async performSearch() {
+      const term = this.keyword.trim();
+      if (!term) return;
+
+      // 如果用户直接输入了 RSS URL，打开预览弹窗一键订阅
+      if (/^https?:\/\//i.test(term)) {
+        this.openRssModal('rss', term);
+        return;
+      }
+
+      const request = ++this.requestId;
+      this.loading = true;
+      this.errorMessage = '';
       try {
+        const res = await podcastApi.search({
+          term,
+          country: this.searchCountry,
+          limit: 25,
+          entity: this.searchEntity,
+        });
+        if (request !== this.requestId) return;
+        this.searchResults = Array.isArray(res.items) ? res.items : [];
+        this.searched = true;
+      } catch (err) {
+        if (request === this.requestId) {
+          this.errorMessage = podcastErrorMessage(err);
+        }
+      } finally {
+        if (request === this.requestId) this.loading = false;
+      }
+    },
+    isPodSubscribed(pod) {
+      if (!pod) return false;
+      return isSubscribed(pod.feedUrl || pod.pid);
+    },
+    async resolvePodcastFeedUrl(pod) {
+      if (pod.feedUrl) return pod;
+      if (!pod.itunesId) {
+        throw new Error('该节目暂未提供公开的 RSS 订阅源');
+      }
+      const list = await podcastApi.lookupByIds(
+        [pod.itunesId],
+        this.chartCountry
+      );
+      if (!list || !list.length || !list[0].feedUrl) {
+        throw new Error('未能查询到该节目的公开 RSS 源地址');
+      }
+      return { ...pod, ...list[0] };
+    },
+    async toggleSubscribeFromList(pod) {
+      try {
+        if (this.isPodSubscribed(pod)) {
+          unsubscribePodcast(pod.feedUrl || pod.pid);
+          this.$store.dispatch('showToast', `已取消订阅「${pod.title}」`);
+        } else {
+          const resolved = await this.resolvePodcastFeedUrl(pod);
+          subscribePodcast(resolved);
+          this.$store.dispatch('showToast', `已订阅「${resolved.title}」`);
+        }
+        this.reloadLocalState();
+      } catch (err) {
+        this.errorMessage = podcastErrorMessage(err);
+      }
+    },
+    async openPodcast(pod) {
+      try {
+        const resolved = await this.resolvePodcastFeedUrl(pod);
+        const pid = registerFeedUrl(resolved.pid, resolved.feedUrl, resolved);
+        this.$router.push({
+          name: 'podcast',
+          params: { id: pid },
+          query: { feed: resolved.feedUrl },
+        });
+      } catch (err) {
+        this.errorMessage = podcastErrorMessage(err);
+      }
+    },
+    async playPodcastLatest(pod) {
+      try {
+        const resolved = await this.resolvePodcastFeedUrl(pod);
+        const res = await podcastApi.fetchFeed(resolved.feedUrl);
+        if (!res.episodes || !res.episodes.length) {
+          this.$store.dispatch('showToast', '该节目暂无可播放单集');
+          return;
+        }
+        const tracks = res.episodes
+          .map(ep => adaptEpisodeToTrack(ep, res.podcast))
+          .filter(Boolean);
+        if (tracks.length > 0) {
+          await this.$store.state.player.playPodcastEpisode(tracks[0], tracks);
+          this.reloadLocalState();
+        }
+      } catch (err) {
+        this.errorMessage = podcastErrorMessage(err);
+      }
+    },
+    async playEpisodeItem(ep) {
+      try {
+        const track = ep.isPodcast ? ep : adaptEpisodeToTrack(ep);
+        if (!track || !track.url) {
+          this.$store.dispatch('showToast', '该单集缺少音频地址');
+          return;
+        }
         const player = this.$store.state.player;
-        if (player.currentTrack.id === ep.id && player._howler) {
+        if (player.currentTrack.id === track.id && player._howler) {
           player.playOrPause();
           return;
         }
-        await player.playPodcastEpisode(ep);
-      } catch (error) {
-        this.errorMessage = xyzErrorMessage(error);
-      }
-    },
-    async playPodcastFirstEpisode(pid) {
-      try {
-        const res = await xyzService.getEpisodeList({ pid, limit: 1 });
-        const list = xyzList(res);
-        if (list.length > 0) {
-          const ep = adaptEpisodeToTrack(list[0].episode || list[0]);
-          await this.playEpisode(ep);
-        }
+        await player.playPodcastEpisode(track);
+        this.reloadLocalState();
       } catch (err) {
-        this.errorMessage = xyzErrorMessage(err);
+        this.errorMessage = podcastErrorMessage(err);
       }
     },
-    formatDuration(seconds) {
-      if (!seconds) return '00:00';
-      const m = Math.floor(seconds / 60);
-      if (m >= 60) {
-        const h = Math.floor(m / 60);
-        const remM = m % 60;
-        return `${h} 小时 ${remM} 分钟`;
-      }
-      return `${m} 分钟`;
+    async refreshAllSubscriptions() {
+      if (this.refreshingSubs || !this.subscriptions.length) return;
+      this.refreshingSubs = true;
+      this.errorMessage = '';
+      const subs = this.subscriptions.slice();
+      let completed = 0;
+      let failed = 0;
+      const concurrency = 3;
+      let cursor = 0;
+
+      const worker = async () => {
+        while (cursor < subs.length) {
+          const sub = subs[cursor++];
+          try {
+            const res = await podcastApi.fetchFeed(sub.feedUrl, true);
+            const episodes = res.episodes || [];
+            const updated = subscribePodcast({
+              ...sub,
+              ...res.podcast,
+              episodeCount: episodes.length,
+              latestPubDate: episodes[0] ? episodes[0].pubDate || '' : '',
+            });
+            mergeLatestEpisodes(updated, episodes);
+          } catch (e) {
+            failed += 1;
+          } finally {
+            completed += 1;
+            this.refreshProgressText = `刷新中 (${completed}/${subs.length})`;
+          }
+        }
+      };
+
+      await Promise.all(
+        Array.from({ length: Math.min(concurrency, subs.length) }, worker)
+      );
+      this.reloadLocalState();
+      this.refreshingSubs = false;
+      this.refreshProgressText = '刷新中...';
+      this.$store.dispatch(
+        'showToast',
+        failed > 0
+          ? `刷新完成，${subs.length - failed} 个成功，${failed} 个源暂不可达`
+          : `已刷新全部 ${subs.length} 个 RSS 订阅`
+      );
     },
-    formatDate(dateStr) {
-      if (!dateStr) return '';
-      const d = new Date(dateStr);
-      return `${d.getMonth() + 1}月${d.getDate()}日`;
+    handleRssSubscribed(entry) {
+      this.reloadLocalState();
+      this.$store.dispatch('showToast', `已订阅「${entry.title}」`);
+      this.$router.push({
+        name: 'podcast',
+        params: { id: entry.pid },
+        query: { feed: entry.feedUrl },
+      });
+    },
+    handleOpmlImported(summary) {
+      this.reloadLocalState();
+      this.currentTab = 'subscriptions';
+      this.$store.dispatch(
+        'showToast',
+        `OPML 导入完成：新增 ${summary.added} 个订阅`
+      );
+    },
+    handleRemoveHistory(eid) {
+      removeHistoryItem(eid);
+      this.reloadLocalState();
+    },
+    handleClearHistory() {
+      clearListeningHistory();
+      this.reloadLocalState();
     },
   },
 };
@@ -547,174 +760,108 @@ export default {
 
 <style lang="scss" scoped>
 .podcast-page {
-  padding: 0 10vw 96px;
+  box-sizing: border-box;
+  max-width: 1240px;
+  width: calc(100% - 96px);
+  margin: 0 auto;
+  padding: 16px 0 112px;
   color: var(--color-text);
-
-  .search-form {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 12px;
-    align-items: center;
-    margin-bottom: 24px;
-  }
-  .search-form input,
-  .search-form select {
-    padding: 12px;
-    background: var(--color-secondary-bg);
-    color: var(--color-text);
-    border-radius: 8px;
-    border: 1px solid var(--color-secondary-bg);
-  }
-  .search-form input {
-    flex: 1;
-    min-width: 180px;
-  }
-  .search-result {
-    display: flex;
-    width: 100%;
-    gap: 16px;
-    align-items: center;
-    text-align: left;
-    padding: 12px;
-    margin-bottom: 12px;
-    border-radius: 12px;
-    background: var(--color-secondary-bg);
-    color: var(--color-text);
-    cursor: pointer;
-  }
-  .search-result img {
-    width: 64px;
-    height: 64px;
-    object-fit: cover;
-    border-radius: 8px;
-  }
-  .search-result span:first-of-type {
-    flex: 1;
-  }
-  button:focus-visible,
-  input:focus-visible,
-  select:focus-visible {
-    outline: 2px solid var(--color-primary);
-    outline-offset: 3px;
-  }
-  .tab-buttons {
-    flex-wrap: wrap;
-  }
-  .tab-btn {
-    border: none;
-    color: var(--color-text);
-    min-height: 44px;
-  }
-  @media (max-width: 640px) {
-    padding: 0 20px 96px;
-    .header-section {
-      flex-wrap: wrap;
-      gap: 16px;
-    }
-    .episodes-grid {
-      grid-template-columns: minmax(0, 1fr);
-    }
-    .episodes-grid .episode-card .play-circle-btn {
-      opacity: 1;
-    }
-  }
 
   .header-section {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-top: 24px;
-    margin-bottom: 24px;
+    margin: 16px 0 24px;
+    gap: 24px;
 
     h1 {
-      font-size: 42px;
+      font-size: 32px;
       font-weight: 700;
       margin: 0;
-      letter-spacing: -0.5px;
+      line-height: 1.3;
+      letter-spacing: -1px;
     }
 
     .subtitle {
       font-size: 14px;
       opacity: 0.72;
-      margin-top: 6px;
+      margin-top: 8px;
     }
 
-    .account-badge {
+    .header-actions {
       display: flex;
-      align-items: center;
-
-      .logged-in {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        background: var(--color-secondary-bg);
-        padding: 6px 14px;
-        border-radius: 24px;
-
-        .user-avatar {
-          width: 32px;
-          height: 32px;
-          border-radius: 50%;
-          object-fit: cover;
-        }
-
-        .user-name {
-          font-size: 14px;
-          font-weight: 600;
-        }
-      }
+      gap: 10px;
+      flex-shrink: 0;
     }
   }
 
   .action-btn {
-    display: flex;
+    display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 6px;
+    min-height: 40px;
     padding: 8px 18px;
-    border-radius: 20px;
+    border-radius: 12px;
     font-size: 14px;
     font-weight: 600;
     cursor: pointer;
     border: none;
+    white-space: nowrap;
     transition: all 0.2s ease;
 
-    &.login-btn {
+    svg {
+      width: 16px;
+      height: 16px;
+      flex-shrink: 0;
+    }
+
+    &.primary-action {
       background: var(--color-primary-bg);
       color: var(--color-primary);
 
       &:hover {
-        filter: brightness(1.1);
-        transform: translateY(-1px);
+        filter: brightness(1.08);
       }
     }
 
-    &.logout-btn {
-      padding: 4px 10px;
-      font-size: 12px;
-      background: transparent;
+    &.secondary-action {
+      background: var(--color-secondary-bg);
       color: var(--color-text);
-      opacity: 0.6;
 
       &:hover {
-        opacity: 1;
-        color: #e53e3e;
+        opacity: 0.85;
       }
+    }
+
+    &:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
     }
   }
 
   .tab-buttons {
     display: flex;
-    gap: 12px;
-    margin-bottom: 32px;
+    flex-wrap: wrap;
+    gap: 28px;
+    margin: 0 0 28px;
+    border-bottom: 1px solid var(--color-secondary-bg);
 
     .tab-btn {
-      padding: 8px 18px;
-      border-radius: 12px;
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 12px 0 16px;
+      min-height: 44px;
+      border: none;
+      border-radius: 0;
+      background: transparent;
+      color: var(--color-text);
+      opacity: 0.65;
       font-size: 15px;
       font-weight: 600;
       cursor: pointer;
-      opacity: 0.75;
-      background: var(--color-secondary-bg);
       transition: all 0.2s ease;
 
       &:hover {
@@ -722,138 +869,69 @@ export default {
       }
 
       &.active {
-        opacity: 1;
-        background: var(--color-primary-bg);
         color: var(--color-primary);
+        opacity: 1;
+      }
+
+      &.active::after {
+        content: '';
+        position: absolute;
+        height: 3px;
+        bottom: -1px;
+        left: 0;
+        right: 0;
+        border-radius: 3px;
+        background: var(--color-primary);
+      }
+
+      .tab-count {
+        font-size: 12px;
+        padding: 1px 7px;
+        border-radius: 10px;
+        background: var(--color-secondary-bg);
+        color: var(--color-text);
       }
     }
   }
 
   .section {
-    margin-bottom: 40px;
+    margin-bottom: 36px;
 
     h2 {
-      font-size: 24px;
+      font-size: 22px;
       font-weight: 700;
-      margin-bottom: 18px;
+      margin: 0 0 16px;
     }
   }
 
-  .episodes-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  .section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     gap: 16px;
+    margin-bottom: 18px;
 
-    .episode-card {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-      padding: 12px;
-      border-radius: 14px;
-      background: var(--color-secondary-bg);
-      cursor: pointer;
-      position: relative;
-      transition: all 0.2s ease;
-
-      &:hover {
-        background: var(--color-secondary-bg-for-transparent);
-        transform: translateY(-2px);
-
-        .play-circle-btn {
-          opacity: 1;
-          transform: scale(1);
-        }
-      }
-
-      .ep-cover {
-        width: 64px;
-        height: 64px;
-        border-radius: 10px;
-        object-fit: cover;
-        flex-shrink: 0;
-      }
-
-      .ep-info {
-        flex: 1;
-        min-width: 0;
-
-        .ep-title {
-          font-size: 15px;
-          font-weight: 600;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
-
-        .ep-podcast {
-          font-size: 13px;
-          opacity: 0.72;
-          margin-top: 3px;
-        }
-
-        .ep-meta {
-          font-size: 12px;
-          opacity: 0.55;
-          margin-top: 4px;
-        }
-      }
-
-      .play-circle-btn {
-        width: 36px;
-        height: 36px;
-        border-radius: 50%;
-        background: var(--color-primary);
-        color: white;
-        border: none;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        cursor: pointer;
-        opacity: 0;
-        transform: scale(0.85);
-        transition: all 0.2s ease;
-        flex-shrink: 0;
-      }
+    h2 {
+      margin: 0;
     }
   }
 
   .podcast-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
-    gap: 24px 20px;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 24px;
 
     .podcast-card {
       cursor: pointer;
-      position: relative;
-
-      &.ranked {
-        .rank-badge {
-          position: absolute;
-          top: -8px;
-          left: -8px;
-          width: 28px;
-          height: 28px;
-          border-radius: 8px;
-          background: var(--color-primary);
-          color: white;
-          font-size: 14px;
-          font-weight: 700;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          z-index: 2;
-          box-shadow: 0 4px 10px rgba(0, 0, 0, 0.15);
-        }
-      }
 
       .cover-wrapper {
         position: relative;
         width: 100%;
         padding-top: 100%;
-        border-radius: 14px;
+        border-radius: 12px;
         overflow: hidden;
         margin-bottom: 10px;
-        box-shadow: 0 6px 14px rgba(0, 0, 0, 0.08);
+        background: var(--color-secondary-bg);
 
         .pod-cover {
           position: absolute;
@@ -873,26 +951,21 @@ export default {
           height: 40px;
           border-radius: 50%;
           background: var(--color-primary);
-          color: white;
+          color: #fff;
           border: none;
           display: flex;
           align-items: center;
           justify-content: center;
           cursor: pointer;
-          opacity: 0;
-          transform: translateY(6px);
-          transition: all 0.25s ease;
+
+          svg {
+            width: 16px;
+            height: 16px;
+          }
         }
 
-        &:hover {
-          .pod-cover {
-            transform: scale(1.04);
-          }
-
-          .pod-play-btn {
-            opacity: 1;
-            transform: translateY(0);
-          }
+        &:hover .pod-cover {
+          transform: scale(1.04);
         }
       }
 
@@ -901,40 +974,185 @@ export default {
         font-weight: 600;
         line-height: 1.4;
         display: -webkit-box;
-        -webkit-line-clamp: 1;
+        -webkit-line-clamp: 2;
         -webkit-box-orient: vertical;
         overflow: hidden;
+        min-height: 42px;
       }
 
       .pod-brief {
         font-size: 12px;
         opacity: 0.65;
         margin-top: 4px;
-        display: -webkit-box;
-        -webkit-line-clamp: 2;
-        -webkit-box-orient: vertical;
+        white-space: nowrap;
         overflow: hidden;
-        line-height: 1.4;
+        text-overflow: ellipsis;
       }
     }
   }
 
-  .ranking-selector {
-    display: flex;
+  .episodes-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 12px;
+
+    .episode-card {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      min-height: 88px;
+      padding: 14px 16px;
+      border-radius: 14px;
+      background: var(--color-secondary-bg);
+      cursor: pointer;
+      transition: background 0.15s ease;
+
+      &:hover {
+        background: var(--color-secondary-bg-for-transparent);
+      }
+
+      .ep-cover {
+        width: 64px;
+        height: 64px;
+        border-radius: 10px;
+        object-fit: cover;
+        flex-shrink: 0;
+      }
+
+      .ep-info {
+        flex: 1;
+        min-width: 0;
+
+        .ep-title {
+          font-size: 15px;
+          font-weight: 600;
+          line-height: 1.45;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+        }
+
+        .ep-podcast {
+          font-size: 13px;
+          opacity: 0.72;
+          margin-top: 3px;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .ep-meta {
+          font-size: 12px;
+          opacity: 0.55;
+          margin-top: 4px;
+        }
+      }
+
+      .remove-history-btn {
+        width: 30px;
+        height: 30px;
+        border-radius: 50%;
+        border: none;
+        background: transparent;
+        color: var(--color-text);
+        opacity: 0.45;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        flex-shrink: 0;
+
+        &:hover {
+          opacity: 1;
+          color: #e53e3e;
+        }
+
+        svg {
+          width: 14px;
+          height: 14px;
+        }
+      }
+
+      .play-circle-btn {
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        background: var(--color-primary);
+        color: #fff;
+        border: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        flex-shrink: 0;
+
+        svg {
+          width: 16px;
+          height: 16px;
+        }
+      }
+    }
+  }
+
+  .ranking-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 24px;
+    margin-bottom: 16px;
+
+    h2 {
+      font-size: 26px;
+      margin: 0 0 8px;
+    }
+
+    p {
+      max-width: 640px;
+      margin: 0 0 8px;
+      font-size: 14px;
+      line-height: 1.6;
+      opacity: 0.65;
+    }
+
+    .ranking-date {
+      font-size: 12px;
+      opacity: 0.5;
+    }
+  }
+
+  .region-select {
+    padding: 8px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--color-secondary-bg);
+    background: var(--color-secondary-bg);
+    color: var(--color-text);
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .genre-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
     margin-bottom: 24px;
 
     .rank-pill {
-      padding: 6px 16px;
-      border-radius: 20px;
-      font-size: 14px;
+      min-height: 34px;
+      padding: 6px 14px;
+      border-radius: 18px;
+      font-size: 13px;
       font-weight: 600;
       background: var(--color-secondary-bg);
       border: none;
       color: var(--color-text);
       cursor: pointer;
-      opacity: 0.7;
+      opacity: 0.75;
       transition: all 0.2s ease;
+
+      &:hover {
+        opacity: 1;
+      }
 
       &.active {
         opacity: 1;
@@ -944,193 +1162,28 @@ export default {
     }
   }
 
-  .empty-state,
-  .loading-state {
-    text-align: center;
-    padding: 60px 0;
-    opacity: 0.7;
-    font-size: 15px;
-
-    .empty-text {
-      margin-bottom: 16px;
-    }
-  }
-}
-// Unified podcast workspace: a quiet frame around editorial content.
-.podcast-page {
-  box-sizing: border-box;
-  max-width: 1240px;
-  width: calc(100% - 96px);
-  margin: 0 auto;
-  padding: 16px 0 112px;
-
-  .header-section {
-    margin: 16px 0 24px;
-    gap: 24px;
-  }
-  .header-section h1 {
-    font-size: 32px;
-    line-height: 1.3;
-    letter-spacing: -1px;
-  }
-  .header-section .subtitle {
-    margin-top: 8px;
-    font-size: 14px;
-  }
-  .account-badge {
-    flex-shrink: 0;
-    .login-btn {
-      min-height: 40px;
-      white-space: nowrap;
-    }
-    .login-btn svg {
-      width: 18px;
-      height: 18px;
-      flex-shrink: 0;
-    }
-  }
-  .tab-buttons {
-    gap: 28px;
-    margin: 0 0 28px;
-    border-bottom: 1px solid var(--color-secondary-bg);
-  }
-  .tab-buttons .tab-btn {
-    position: relative;
-    padding: 12px 0 16px;
-    border-radius: 0;
-    background: transparent;
-    opacity: 0.65;
-    font-size: 15px;
-    &.active {
-      background: transparent;
-      color: var(--color-primary);
-      opacity: 1;
-    }
-    &.active::after {
-      content: '';
-      position: absolute;
-      height: 3px;
-      bottom: -1px;
-      left: 0;
-      right: 0;
-      border-radius: 3px;
-      background: var(--color-primary);
-    }
-  }
-  .section {
-    margin-bottom: 32px;
-  }
-  .section h2 {
-    font-size: 22px;
-    margin-bottom: 16px;
-  }
-  .episodes-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 12px;
-  }
-  .episodes-grid .episode-card {
-    min-height: 88px;
-    padding: 16px;
-    transform: none;
-  }
-  .episodes-grid .episode-card .ep-info .ep-title {
-    white-space: normal;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    line-height: 1.5;
-  }
-  .episodes-grid .episode-card .play-circle-btn {
-    opacity: 1;
-    transform: none;
-    width: 44px;
-    height: 44px;
-  }
-  .podcast-grid {
-    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-    gap: 24px;
-  }
-  .podcast-grid .podcast-card .cover-wrapper {
-    box-shadow: none;
-    border-radius: 12px;
-  }
-  .podcast-grid .podcast-card .pod-title {
-    -webkit-line-clamp: 2;
-    min-height: 42px;
-  }
-  .podcast-grid .podcast-card .cover-wrapper .pod-play-btn {
-    opacity: 1;
-    transform: none;
-    width: 44px;
-    height: 44px;
-  }
-
-  .ranking-heading {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 24px;
-    margin-bottom: 24px;
-  }
-  .ranking-heading h2 {
-    font-size: 26px;
-    margin: 0 0 8px;
-  }
-  .ranking-heading p {
-    max-width: 620px;
-    margin: 0 0 8px;
-    font-size: 14px;
-    line-height: 1.6;
-    opacity: 0.65;
-  }
-  .ranking-date {
-    font-size: 12px;
-    opacity: 0.5;
-  }
-  .ranking-selector {
-    flex-shrink: 0;
-    gap: 4px;
-    margin: 0;
-    padding: 4px;
-    border-radius: 10px;
-    background: var(--color-secondary-bg);
-  }
-  .ranking-selector .rank-pill {
-    min-height: 36px;
-    padding: 8px 14px;
-    border-radius: 7px;
-    background: transparent;
-    font-size: 13px;
-  }
-  .ranking-selector .rank-pill.active {
-    background: var(--color-primary-bg);
-  }
   .ranking-list {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 0 28px;
   }
+
   .ranking-row {
     display: flex;
     align-items: center;
     gap: 14px;
     min-width: 0;
-    min-height: 124px;
-    width: 100%;
-    padding: 18px 8px;
-    text-align: left;
-    border: 0;
+    min-height: 112px;
+    padding: 16px 8px;
     border-bottom: 1px solid var(--color-secondary-bg);
-    border-radius: 0;
-    background: transparent;
-    color: var(--color-text);
     cursor: pointer;
     transition: background 150ms ease;
-    &:hover,
-    &.is-current {
+
+    &:hover {
       background: var(--color-secondary-bg);
     }
   }
+
   .ranking-number {
     width: 26px;
     flex-shrink: 0;
@@ -1139,30 +1192,35 @@ export default {
     opacity: 0.35;
     font-variant-numeric: tabular-nums;
   }
+
   .top-three .ranking-number {
     color: var(--color-primary);
     opacity: 1;
   }
+
   .ranking-cover {
-    width: 76px;
-    height: 76px;
+    width: 72px;
+    height: 72px;
     border-radius: 10px;
     object-fit: cover;
     flex-shrink: 0;
   }
+
   .ranking-copy {
     flex: 1;
     min-width: 0;
   }
+
   .ranking-title {
     display: -webkit-box;
     -webkit-line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
     font-size: 15px;
-    line-height: 1.5;
+    line-height: 1.45;
     font-weight: 600;
   }
+
   .ranking-podcast {
     display: block;
     overflow: hidden;
@@ -1170,29 +1228,126 @@ export default {
     white-space: nowrap;
     font-size: 13px;
     opacity: 0.65;
-    margin-top: 5px;
+    margin-top: 4px;
   }
+
   .ranking-duration {
     display: block;
     font-size: 12px;
     opacity: 0.45;
     margin-top: 4px;
   }
-  .ranking-play {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 36px;
-    height: 36px;
-    flex-shrink: 0;
-    border-radius: 50%;
+
+  .sub-pill-btn {
+    padding: 6px 14px;
+    border-radius: 16px;
+    border: none;
     background: var(--color-primary-bg);
     color: var(--color-primary);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+
+    &.subscribed {
+      background: var(--color-secondary-bg);
+      color: var(--color-text);
+      opacity: 0.78;
+    }
+
+    &:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
   }
-  .ranking-play svg {
-    width: 16px;
-    height: 16px;
+
+  .search-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 24px;
+
+    input,
+    select {
+      height: 42px;
+      padding: 0 12px;
+      background: var(--color-secondary-bg);
+      color: var(--color-text);
+      border-radius: 10px;
+      border: 1px solid var(--color-secondary-bg);
+      font-size: 14px;
+    }
+
+    input {
+      flex: 1;
+      min-width: 220px;
+    }
   }
+
+  .search-result {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+    border-radius: 12px;
+    background: var(--color-secondary-bg);
+    cursor: pointer;
+    transition: background 0.15s ease;
+
+    &:hover {
+      background: var(--color-secondary-bg-for-transparent);
+    }
+
+    img {
+      width: 64px;
+      height: 64px;
+      border-radius: 10px;
+      object-fit: cover;
+      flex-shrink: 0;
+    }
+
+    .search-copy {
+      flex: 1;
+      min-width: 0;
+
+      .search-title {
+        font-size: 15px;
+        font-weight: 600;
+        line-height: 1.4;
+      }
+
+      .search-sub {
+        font-size: 13px;
+        opacity: 0.65;
+        margin-top: 4px;
+      }
+    }
+  }
+
+  .empty-state,
+  .loading-state {
+    text-align: center;
+    padding: 56px 16px;
+    opacity: 0.78;
+    font-size: 15px;
+
+    .empty-text {
+      max-width: 520px;
+      margin: 0 auto 20px;
+      line-height: 1.7;
+    }
+
+    .empty-actions {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+  }
+
   .empty-state[role='alert'] {
     padding: 16px 20px;
     background: var(--color-secondary-bg);
@@ -1200,60 +1355,31 @@ export default {
     text-align: left;
     line-height: 1.6;
     margin-bottom: 20px;
+
+    .action-btn {
+      margin-left: 12px;
+      color: var(--color-primary);
+    }
   }
-  .empty-state[role='alert'] .action-btn {
-    display: inline-flex;
-    margin-left: 12px;
-    color: var(--color-primary);
-  }
+
   @media (max-width: 1050px) {
     width: calc(100% - 48px);
+
     .ranking-list {
       grid-template-columns: minmax(0, 1fr);
     }
-    .ranking-heading {
-      align-items: flex-start;
-    }
   }
+
   @media (max-width: 680px) {
     width: calc(100% - 32px);
-    .header-section h1 {
-      font-size: 28px;
-    }
-    .tab-buttons {
-      gap: 20px;
-      flex-wrap: nowrap;
-      overflow-x: auto;
-    }
-    .tab-buttons .tab-btn {
-      white-space: nowrap;
-    }
-    .ranking-heading {
+
+    .header-section {
       flex-direction: column;
-      gap: 16px;
+      align-items: flex-start;
     }
+
     .episodes-grid {
       grid-template-columns: minmax(0, 1fr);
-    }
-    .ranking-row {
-      gap: 10px;
-      padding: 14px 0;
-    }
-    .ranking-cover {
-      width: 64px;
-      height: 64px;
-    }
-    .ranking-play {
-      width: 32px;
-      height: 32px;
-    }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    *,
-    *::before,
-    *::after {
-      transition: none !important;
-      transform: none !important;
     }
   }
 }

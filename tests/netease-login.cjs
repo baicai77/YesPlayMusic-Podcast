@@ -100,19 +100,20 @@ async function main() {
   const detail = load(detailSource, {
     '@/components/ButtonTwoTone.vue': {},
     '@/components/Modal.vue': {},
-    '@/xyz/client': {},
-    '@/xyz/adapter': {},
-    '@/xyz/notes': {},
+    '@/podcast/client': {},
+    '@/podcast/adapter': {},
+    '@/podcast/notes': {},
+    '@/podcast/storage': {},
   }).default;
   const player = {
-    currentTrack: { id: 'xyz_test' },
+    currentTrack: { id: 'rss_test' },
     _howler: {},
     playOrPause: () => toggled++,
     playPodcastEpisode: async () => replaced++,
   };
   await detail.methods.playEpisode.call(
-    { $store: { state: { player } }, episodes: [] },
-    { id: 'xyz_test' }
+    { $store: { state: { player } }, sortedEpisodes: [] },
+    { id: 'rss_test' }
   );
   assert.equal(toggled, 1);
   assert.equal(replaced, 0);

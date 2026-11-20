@@ -39,6 +39,8 @@ const excludeSaveKeys = [
   '_playing',
   '_personalFMLoading',
   '_personalFMNextLoading',
+  '_podcastQueueMap',
+  '_howler',
 ];
 
 function setTitle(track) {
@@ -86,7 +88,8 @@ export default class {
     }; // 私人FM下一首歌曲信息（为了快速加载下一首）
     this._playbackRate =
       Number(localStorage.getItem('playerPlaybackRate')) || 1.0;
-    this._lastXyzProgressSync = 0;
+    this._lastPodcastProgressSync = 0;
+    this._podcastQueueMap = new Map();
 
     /**
      * The blob records for cleanup.
@@ -226,9 +229,9 @@ export default class {
     localStorage.setItem('playerPlaybackRate', val);
   }
   get isPodcast() {
-    return (
+    return Boolean(
       this._currentTrack?.isPodcast ||
-      String(this._currentTrack?.id || '').startsWith('xyz_')
+        String(this._currentTrack?.id || '').startsWith('rss_')
     );
   }
   skipSeconds(delta) {
@@ -283,14 +286,14 @@ export default class {
       if (isCreateMpris) {
         ipcRenderer?.send('playerCurrentTrackTime', this._progress);
       }
-      // 小宇宙播客进度静默同步（每 15 秒上报一次）
+      // RSS 播客本地断点定时保存（每 10 秒保存一次，纯本地存储）
       if (this.playing && this.isPodcast && this._currentTrack?.eid) {
         const now = Date.now();
         if (
-          !this._lastXyzProgressSync ||
-          now - this._lastXyzProgressSync > 15000
+          !this._lastPodcastProgressSync ||
+          now - this._lastPodcastProgressSync > 10000
         ) {
-          this._lastXyzProgressSync = now;
+          this._lastPodcastProgressSync = now;
           this._syncPodcastProgress();
         }
       }
@@ -390,18 +393,13 @@ export default class {
         this._nextTrackCallback();
       },
     });
-    this._howler._xyzEid = this._currentTrack?.eid;
+    this._howler._podcastEid = this._currentTrack?.eid;
     this._howler.rate(this.isPodcast ? this.playbackRate : 1);
     if (this._currentTrack?.eid) {
       const track = this._currentTrack;
-      const local = localStorage.getItem(`xyz_progress_${track.eid}`);
-      const resume =
-        Number(
-          track._preferCloudProgress
-            ? track.playbackProgress
-            : local ?? track.playbackProgress
-        ) || 0;
-      delete track._preferCloudProgress;
+      const { getEpisodeProgress } = require('@/podcast/storage');
+      const local = getEpisodeProgress(track.eid);
+      const resume = Number(local || track.playbackProgress) || 0;
       const audio = this._howler;
       audio.once('load', () => {
         if (this._howler !== audio) return;
@@ -551,7 +549,7 @@ export default class {
     return this._getAudioSourceBlobURL(buffer);
   }
   _getAudioSource(track) {
-    if (track.isPodcast || String(track.id).startsWith('xyz_') || track.url) {
+    if (track.isPodcast || String(track.id).startsWith('rss_') || track.url) {
       return Promise.resolve(track.url);
     }
     return this._getAudioSourceFromCache(String(track.id))
@@ -573,33 +571,27 @@ export default class {
     if (autoplay && this._currentTrack.name) {
       this._scrobble(this.currentTrack, this._howler?.seek());
     }
-    if (String(id).startsWith('xyz_')) {
-      if (this._currentTrack?.id === id && this._currentTrack?.url) {
-        this._updateMediaSessionMetaData(this._currentTrack);
-        return this._replaceCurrentTrackAudio(
-          this._currentTrack,
-          autoplay,
-          false,
-          ifUnplayableThen
+    if (String(id).startsWith('rss_')) {
+      const { getCachedTrackById } = require('@/podcast/storage');
+      const resolvedTrack =
+        (this._currentTrack?.id === id && this._currentTrack?.url
+          ? this._currentTrack
+          : null) ||
+        (this._podcastQueueMap && this._podcastQueueMap.get(id)) ||
+        getCachedTrackById(id);
+      if (!resolvedTrack || !resolvedTrack.url) {
+        return Promise.reject(
+          new Error('播客单集本地缓存已过期，请从节目页重新播放')
         );
       }
-      const eid = String(id).replace('xyz_', '');
-      const { xyzService } = require('@/xyz/client');
-      const { adaptEpisodeToTrack } = require('@/xyz/adapter');
-      return xyzService.getEpisodeDetail(eid).then(res => {
-        if (request !== this._trackRequest) return false;
-        const epData = res?.data || res;
-        const track = adaptEpisodeToTrack(epData?.episode || epData);
-        if (!track) throw new Error('单集详情不可用');
-        this._currentTrack = track;
-        this._updateMediaSessionMetaData(track);
-        return this._replaceCurrentTrackAudio(
-          track,
-          autoplay,
-          false,
-          ifUnplayableThen
-        );
-      });
+      this._currentTrack = resolvedTrack;
+      this._updateMediaSessionMetaData(resolvedTrack);
+      return this._replaceCurrentTrackAudio(
+        resolvedTrack,
+        autoplay,
+        false,
+        ifUnplayableThen
+      );
     }
     return getTrackDetail(id).then(data => {
       if (request !== this._trackRequest) return false;
@@ -625,32 +617,6 @@ export default class {
   ) {
     const request = this._trackRequest;
     return this._getAudioSource(track).then(async source => {
-      if (track.eid) {
-        const { xyzService, isXyzLoggedIn } = require('@/xyz/client');
-        if (isXyzLoggedIn()) {
-          try {
-            const { xyzList } = require('@/xyz/adapter');
-            const response = await xyzService.getPlaybackProgress([track.eid]);
-            const remote = xyzList(response).find(
-              item => item.eid === track.eid
-            );
-            const localTime =
-              Number(localStorage.getItem(`xyz_progress_time_${track.eid}`)) ||
-              0;
-            if (
-              remote &&
-              Number.isFinite(remote.progress) &&
-              remote.progress >= 0 &&
-              Date.parse(remote.playedAt) > localTime
-            ) {
-              track.playbackProgress = remote.progress;
-              track._preferCloudProgress = true;
-            }
-          } catch {
-            // A progress lookup must not block playback when the service is unavailable.
-          }
-        }
-      }
       if (request !== this._trackRequest || track.id !== this.currentTrackID)
         return false;
       if (source) {
@@ -688,7 +654,7 @@ export default class {
       ? this._personalFMNextTrack?.id ?? 0
       : this._getNextTrack()[0];
     if (!nextTrackID) return;
-    if (String(nextTrackID).startsWith('xyz_')) return;
+    if (String(nextTrackID).startsWith('rss_')) return;
     if (this._personalFMTrack.id == nextTrackID) return;
     getTrackDetail(nextTrackID).then(data => {
       let track = data.songs[0];
@@ -1055,29 +1021,53 @@ export default class {
     });
   }
   playPodcastByID(pid, trackID = 'first') {
-    const { xyzService } = require('@/xyz/client');
-    const { adaptEpisodeToTrack } = require('@/xyz/adapter');
-    xyzService.getEpisodeList({ pid, limit: 100, order: 'desc' }).then(res => {
-      const episodes = res?.data || res || [];
-      const adaptedTracks = episodes.map(item => adaptEpisodeToTrack(item));
-      const trackIDs = adaptedTracks.map(t => t.id);
-      this.replacePlaylist(trackIDs, pid, 'podcast', trackID);
+    const { podcastApi } = require('@/podcast/client');
+    const { adaptEpisodeToTrack } = require('@/podcast/adapter');
+    const { getFeedUrlByPid } = require('@/podcast/storage');
+    const feedUrl = getFeedUrlByPid(pid);
+    if (!feedUrl) return;
+    podcastApi.fetchFeed(feedUrl).then(res => {
+      const episodes = res?.episodes || [];
+      const adaptedTracks = episodes
+        .map(item => adaptEpisodeToTrack(item, res?.podcast))
+        .filter(Boolean);
+      if (!adaptedTracks.length) return;
+      const target =
+        trackID === 'first'
+          ? adaptedTracks[0]
+          : adaptedTracks.find(t => t.id === trackID) || adaptedTracks[0];
+      this.playPodcastEpisode(target, adaptedTracks);
     });
   }
   async playPodcastEpisode(episode, playlist = []) {
-    if (!episode?.eid) throw new Error('无效的播客单集');
+    if (!episode?.eid || !episode?.url) throw new Error('无效的播客单集');
+    const {
+      cacheTrackMetadata,
+      recordListeningHistory,
+      getEpisodeProgress,
+    } = require('@/podcast/storage');
     this._syncPodcastProgress();
     this._isPersonalFM = false;
     this._shuffle = false;
     this._reversed = false;
     this._playNextList = [];
     this._playlistSource = { type: 'podcast', id: episode.pid };
-    this._list = playlist.length ? playlist.map(e => e.id) : [episode.id];
-    this._current = Math.max(0, this._list.indexOf(episode.id));
+    if (!this._podcastQueueMap) this._podcastQueueMap = new Map();
+    const queue = playlist.length ? playlist : [episode];
+    queue.forEach(item => {
+      if (item && item.id) {
+        this._podcastQueueMap.set(item.id, item);
+      }
+    });
+    this._podcastQueueMap.set(episode.id, episode);
+    this._list = queue.map(e => e.id);
     if (!this._list.includes(episode.id)) this._list.unshift(episode.id);
+    this._current = Math.max(0, this._list.indexOf(episode.id));
     this._currentTrack = episode;
     this._enabled = true;
-    this._lastXyzProgressSync = 0;
+    this._lastPodcastProgressSync = 0;
+    cacheTrackMetadata(episode);
+    recordListeningHistory(episode, getEpisodeProgress(episode.eid));
     return this._replaceCurrentTrack(episode.id);
   }
 
@@ -1085,31 +1075,18 @@ export default class {
     if (
       !this._currentTrack?.eid ||
       !this._howler ||
-      this._howler._xyzEid !== this._currentTrack.eid ||
+      this._howler._podcastEid !== this._currentTrack.eid ||
       (this._howler.state && this._howler.state() !== 'loaded')
     )
       return;
-    const { xyzService, isXyzLoggedIn } = require('@/xyz/client');
+    const {
+      saveEpisodeProgress,
+      recordListeningHistory,
+    } = require('@/podcast/storage');
     const progress = Number(this._howler.seek());
     if (!Number.isFinite(progress)) return;
-    localStorage.setItem(
-      `xyz_progress_${this._currentTrack.eid}`,
-      String(progress)
-    );
-    localStorage.setItem(
-      `xyz_progress_time_${this._currentTrack.eid}`,
-      String(Date.now())
-    );
-    if (isXyzLoggedIn()) {
-      xyzService
-        .updatePlaybackProgress({
-          pid: this._currentTrack.pid,
-          eid: this._currentTrack.eid,
-          progress,
-          duration: this.currentTrackDuration,
-        })
-        .catch(() => {});
-    }
+    saveEpisodeProgress(this._currentTrack.eid, progress);
+    recordListeningHistory(this._currentTrack, progress);
   }
   playTrackOnListByID(id, listName = 'default') {
     if (listName === 'default') {

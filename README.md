@@ -1,10 +1,10 @@
 <div align="center">
   <img src="images/logo.png" alt="Logo" width="128" height="128">
-  <h1 align="center" style="font-weight: 700">YesPlayMusic - Podcast Edition</h1>
+  <h1 align="center" style="font-weight: 700">YesPlayMusic - RSS Podcast Edition</h1>
   <p align="center">
-    <b>网易云音乐 × 小宇宙播客 (XiaoYuniverse FM) 高颜值双模桌面播放器</b>
+    <b>网易云音乐 × 标准 RSS / OPML 播客高颜值双模桌面播放器</b>
     <br />
-    基于 YesPlayMusic 与 ultrazg/xyz 深度融合衍生开发
+    基于 YesPlayMusic 与开放 RSS / Apple Podcasts 公开目录开发（无需登录小宇宙账号，零封号风险）
   </p>
   <p align="center">
     <a href="https://github.com/baicai77/YesPlayMusic-Podcast/releases"><strong>📦️ 下载 Windows 客户端 (Releases)</strong></a>&nbsp;&nbsp;|&nbsp;&nbsp;
@@ -27,15 +27,14 @@
 
 ## ✨ 核心特性
 
-### 1. 🎙️ 小宇宙播客 (XiaoYuniverse FM)
-* **零外部环境依赖**：完全用 Node.js / Express 原生实现小宇宙 API 代理，无需额外安装 Go 语言环境或配置二进制子进程。
-* **精选与热门榜单**：同步小宇宙官方「今日精选单集」、「推荐节目」以及「最热榜 / 新星榜 / 锋芒榜」。
-* **我的订阅与历史记录**：支持手机短信验证码登录或官方网页 Token 导入，无缝拉取已订阅播客与云端收听历史。
-* **播客节目主页与选集**：完整的节目介绍、作者信息、总集数、正序/倒序排列。
-* **全屏 Show Notes 节目单**：播放播客时，全屏视图自适应切换为 Show Notes 视图，图文排版清晰，支持一键点击参考链接。
-* **倍速播放控制**：Howler 音频引擎深度扩展，支持 `0.8x / 1.0x / 1.25x / 1.5x / 1.75x / 2.0x` 快速切换。
-* **快进 30s / 快退 15s**：专属跳过/回溯控制。
-* **双向进度云同步**：本地自动保存断点续听，播放中定时（每 15 秒）静默上报进度至小宇宙云端，实现手机端与电脑端进度无缝互通。
+### 1. 🎙️ 标准 RSS / OPML 播客（免登录・零封号风险）
+* **完全开放标准**：不再登录小宇宙账号，也不调用任何第三方私有移动端 API，彻底规避账号风控与封号风险。
+* **任意 RSS / Atom 订阅**：粘贴任意公开 RSS / Atom 链接即可解析封面、简介、单集列表与 Show Notes，一键本地订阅。
+* **OPML 导入与导出**：支持从 Apple Podcasts、Overcast、Pocket Casts、AntennaPod 等播客客户端导入标准 OPML 订阅列表，或将当前订阅一键导出备份。
+* **公开榜单与搜索**：接入 Apple Podcasts 公开热门榜单（多地区、多分类）及 iTunes Search 公开检索接口（支持搜节目与搜单集），自动关联官方 RSS 源。
+* **订阅更新流与单集筛选**：支持并发刷新全部已订阅 RSS 源、查看「订阅最新更新」，节目详情页支持按标题实时筛选与正序/倒序切换。
+* **全屏 Show Notes 节目单**：播放播客时，全屏视图自适应切换为安全过滤后的 Show Notes 图文视图。
+* **倍速与本地断点续听**：支持 `0.8x / 1.0x / 1.25x / 1.5x / 1.75x / 2.0x` 倍速、快退 15s / 快进 30s，以及纯本地自动保存断点进度与收听历史。
 
 ### 2. 🎵 网易云音乐 (YesPlayMusic 原生体验)
 * 完整保留 YesPlayMusic 原生的极简高颜值体验。
@@ -44,16 +43,16 @@
 
 ---
 
-## 🔒 凭证安全风险与已知限制
+## 🔒 隐私安全与已知限制
 
-### 凭证安全风险提示
-1. **本地存储**：你的小宇宙 Token (`x-jike-access-token` / `x-jike-refresh-token`) 与网易云 Cookie 仅保存在本机客户端的 `localStorage` 中，直接由本地轻量代理与官方服务器通信，**绝不会上传至任何第三方服务器**。
-2. **凭证妥善保管**：Token 与 Cookie 等同于你的登录密码，切勿将配置文件、调试日志或带有 Token 的请求截图发送给他人。
-3. **风控风险**：使用非官方第三方客户端调用接口存在被官方风控（如要求验证码人机校验）或限制账号的风险，请谨慎合理使用。
+### 隐私与账号安全说明
+1. **播客免登录**：播客模块完全基于开放 RSS / Atom / OPML 与 Apple Podcasts 公开目录，**不再登录小宇宙账号、不再保存或发送任何小宇宙 Token**，彻底规避小宇宙封号风险。
+2. **本地存储**：RSS 订阅列表、收听历史、断点续听进度及网易云 Cookie 仅保存在本机 `localStorage` 中，**绝不会上传至任何第三方服务器**。
+3. **SSRF 防护**：内置本地 `/podcast-api` 抓取代理仅允许公网 HTTP/HTTPS RSS 源，禁止访问本机及内网地址。
 
 ### 已知限制说明
-* **短信验证码人机验证**：小宇宙官方对部分短信登录请求可能要求 `captchaVerifyParam` 滑块校验。如遇到限制，推荐使用客户端内置的**「使用官方网页登录凭证」**功能（在小宇宙官方创作者后台登录后复制 Token 导入）。
-* **部分接口权限**：目前收件箱、评论提交与收藏读取在第三方环境可能返回上游 `rpc_error`，当前 UI 暂未开放这些受限入口。
+* **平台专属内容**：仅支持公开 RSS 源播客，无法同步小宇宙评论区、云端收听进度或仅限小宇宙 App 内的独家/付费内容。
+* **多设备同步**：可通过「OPML 导入/导出」手动在多设备或不同播客客户端之间迁移订阅列表。
 * **Windows 未签名提示**：因个人开源构建未购买商业数字证书，首次运行时 Windows Defender SmartScreen 可能会提示“未知发布者”，点击“更多信息 -> 仍要运行”即可。
 
 ---

@@ -319,6 +319,14 @@ export default {
       this.$router.push({ path: '/album/' + this.player.currentTrack.al.id });
     },
     goToArtist(id) {
+      if (this.player.isPodcast) {
+        const pid =
+          this.player.currentTrack.pid || this.player.playlistSource?.id;
+        if (pid) {
+          this.$router.push({ path: '/podcast/' + pid });
+          return;
+        }
+      }
       this.$router.push({ path: '/artist/' + id });
     },
     moveToFMTrash() {

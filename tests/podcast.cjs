@@ -1,317 +1,398 @@
-/* Offline regression checks: node tests/podcast.cjs */
+/* Offline regression checks for RSS / OPML Podcast architecture: node tests/podcast.cjs */
 const assert = require('assert');
 const fs = require('fs');
+const path = require('path');
 const vm = require('vm');
 const babel = require('@babel/core');
+
 const storage = new Map();
 const localStorage = {
-  getItem: key => storage.get(key) ?? null,
+  getItem: key => (storage.has(key) ? storage.get(key) : null),
   setItem: (key, value) => storage.set(key, String(value)),
   removeItem: key => storage.delete(key),
+  clear: () => storage.clear(),
 };
-function load(file, mocks = {}, extra = {}) {
-  const code = babel.transformSync(fs.readFileSync(file, 'utf8'), {
+
+function loadModule(file, mocks = {}, extra = {}) {
+  const absPath = path.resolve(file);
+  const dir = path.dirname(absPath);
+  const code = babel.transformSync(fs.readFileSync(absPath, 'utf8'), {
     babelrc: false,
     configFile: false,
     plugins: ['@babel/plugin-transform-modules-commonjs'],
   }).code;
-  const module = { exports: {} };
+  const mod = { exports: {} };
   vm.runInNewContext(
     code,
     {
-      module,
-      exports: module.exports,
-      require: name => mocks[name] || require(name),
+      module: mod,
+      exports: mod.exports,
+      require: name => {
+        if (Object.prototype.hasOwnProperty.call(mocks, name)) {
+          return mocks[name];
+        }
+        if (name.startsWith('./') || name.startsWith('../')) {
+          const resolved = path.resolve(dir, name);
+          const candidate = resolved.endsWith('.js')
+            ? resolved
+            : `${resolved}.js`;
+          if (fs.existsSync(candidate)) {
+            return loadModule(candidate, mocks, extra);
+          }
+        }
+        if (name.startsWith('@/')) {
+          const resolved = path.resolve('src', name.slice(2));
+          const candidate = resolved.endsWith('.js')
+            ? resolved
+            : `${resolved}.js`;
+          if (fs.existsSync(candidate)) {
+            return loadModule(candidate, mocks, extra);
+          }
+        }
+        return require(name);
+      },
       localStorage,
       console,
       URL,
       ...extra,
     },
-    { filename: file }
+    { filename: absPath }
   );
-  return module.exports;
+  return mod.exports;
 }
+
 async function main() {
-  let refreshRequest;
-  let refreshResponse = {
-    headers: {},
-    data: {
-      'x-jike-access-token': 'next-access',
-      'x-jike-refresh-token': 'next-refresh',
-    },
-  };
-  const refreshApi = load('src/xyz/api.js', {
+  /* 1. XML & RSS 2.0 / Atom 解析 */
+  const xml = require('../src/podcast/xml');
+  assert.equal(
+    xml.decodeXmlEntities('A &amp; B &lt;3&#39; &#x1F399;'),
+    "A & B <3' 🎙"
+  );
+
+  const rss = require('../src/podcast/rss');
+  assert.equal(rss.parseDuration('01:02:03'), 3723);
+  assert.equal(rss.parseDuration('45:30'), 2730);
+  assert.equal(rss.parseDuration('185'), 185);
+  assert.equal(rss.parseDuration('invalid'), 0);
+
+  const sampleRss = `<?xml version="1.0" encoding="UTF-8"?>
+  <!-- 播客测试样例 -->
+  <rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+    <channel>
+      <title>测试中文播客 &amp; 漫谈</title>
+      <link>https://example.com/show</link>
+      <description><![CDATA[<p>这是一档关于<b>技术</b>与生活的播客</p>]]></description>
+      <language>zh-CN</language>
+      <itunes:author>主播甲</itunes:author>
+      <itunes:image href="https://cdn.example.com/cover.jpg" />
+      <itunes:category text="Technology"><itunes:category text="Tech News" /></itunes:category>
+      <item>
+        <title>EP01 为什么改用标准 RSS</title>
+        <guid>ep-guid-001</guid>
+        <pubDate>Tue, 17 Nov 2026 08:00:00 +0800</pubDate>
+        <itunes:duration>01:12:05</itunes:duration>
+        <description>简要说明</description>
+        <content:encoded><![CDATA[<p>完整 <strong>Show Notes</strong> 节目单</p><a href="https://example.com/ref">参考链接</a>]]></content:encoded>
+        <enclosure url="https://audio.example.com/ep01.mp3" length="123456" type="audio/mpeg" />
+      </item>
+      <item>
+        <title>EP02 无音频条目的公告（应跳过）</title>
+        <guid>ep-guid-no-audio</guid>
+      </item>
+      <item>
+        <title>EP01 重复 GUID（应去重）</title>
+        <guid>ep-guid-001</guid>
+        <enclosure url="https://audio.example.com/ep01.mp3" type="audio/mpeg" />
+      </item>
+    </channel>
+  </rss>`;
+
+  const parsedRss = rss.parseRssFeed(sampleRss, 'https://feeds.example.com/rss.xml');
+  assert.equal(parsedRss.podcast.title, '测试中文播客 & 漫谈');
+  assert.equal(parsedRss.podcast.author, '主播甲');
+  assert.equal(parsedRss.podcast.coverImgUrl, 'https://cdn.example.com/cover.jpg');
+  assert.ok(parsedRss.podcast.categories.includes('Technology'));
+  assert.equal(parsedRss.episodes.length, 1);
+  assert.equal(parsedRss.episodes[0].duration, 4325);
+  assert.match(parsedRss.episodes[0].showNotes, /完整 <strong>Show Notes<\/strong>/);
+  assert.equal(parsedRss.episodes[0].audioUrl, 'https://audio.example.com/ep01.mp3');
+  assert.equal(
+    parsedRss.podcast.pid,
+    rss.createPodcastId('https://feeds.example.com/rss.xml')
+  );
+
+  const sampleAtom = `<?xml version="1.0" encoding="utf-8"?>
+  <feed xmlns="http://www.w3.org/2005/Atom">
+    <title>Atom 播客样例</title>
+    <author><name>Atom 主播</name></author>
+    <entry>
+      <id>atom-ep-1</id>
+      <title>第一集</title>
+      <published>2026-11-18T10:00:00Z</published>
+      <link rel="enclosure" type="audio/mp4" href="https://audio.example.com/atom1.m4a" />
+      <summary>Atom 简介</summary>
+    </entry>
+  </feed>`;
+  const parsedAtom = rss.parseRssFeed(sampleAtom, 'https://feeds.example.com/atom.xml');
+  assert.equal(parsedAtom.podcast.title, 'Atom 播客样例');
+  assert.equal(parsedAtom.episodes.length, 1);
+  assert.equal(parsedAtom.episodes[0].audioUrl, 'https://audio.example.com/atom1.m4a');
+  console.log('PASS: XML, RSS 2.0 and Atom parsing');
+
+  /* 2. OPML 导入与导出往返 */
+  const opml = require('../src/podcast/opml');
+  const sampleOpml = `<?xml version="1.0" encoding="UTF-8"?>
+  <opml version="2.0">
+    <head><title>我的播客</title></head>
+    <body>
+      <outline text="科技">
+        <outline type="rss" text="科技漫谈 &amp; 杂谈" xmlUrl="https://feeds.example.com/tech.xml" htmlUrl="https://example.com/tech" />
+        <outline type="rss" text="重复源" xmlUrl="https://feeds.example.com/tech.xml" />
+      </outline>
+      <outline type="rss" title="商业故事" xmlUrl="https://feeds.example.com/biz.xml" />
+    </body>
+  </opml>`;
+  const importedFeeds = opml.parseOpml(sampleOpml);
+  assert.equal(importedFeeds.length, 2);
+  assert.equal(importedFeeds[0].title, '科技漫谈 & 杂谈');
+  assert.deepEqual(importedFeeds[0].categories, ['科技']);
+  const exportedXml = opml.exportOpml(importedFeeds);
+  const roundTrip = opml.parseOpml(exportedXml);
+  assert.equal(roundTrip.length, 2);
+  assert.equal(roundTrip[0].title, '科技漫谈 & 杂谈');
+  assert.equal(roundTrip[1].feedUrl, 'https://feeds.example.com/biz.xml');
+  console.log('PASS: OPML parse, deduplication, export and round-trip');
+
+  /* 3. SSRF 安全校验 */
+  const security = require('../src/podcast/security');
+  assert.equal(
+    security.validatePublicHttpUrl('https://feeds.fireside.fm/test/rss#top'),
+    'https://feeds.fireside.fm/test/rss'
+  );
+  for (const blockedUrl of [
+    'http://localhost:8080/feed.xml',
+    'http://127.0.0.1/feed.xml',
+    'http://10.0.0.1/feed.xml',
+    'http://172.16.0.5/feed.xml',
+    'http://192.168.1.1/feed.xml',
+    'http://169.254.169.254/latest/meta-data/',
+    'http://[::1]/feed.xml',
+    'file:///etc/passwd',
+    'ftp://example.com/feed.xml',
+  ]) {
+    assert.throws(
+      () => security.validatePublicHttpUrl(blockedUrl),
+      err => err.status === 400,
+      `must block ${blockedUrl}`
+    );
+  }
+  await assert.rejects(
+    security.assertPublicHostResolution('https://internal.example.com/rss', async () => [
+      { address: '127.0.0.1', family: 4 },
+    ]),
+    err => err.status === 400
+  );
+  console.log('PASS: SSRF and protocol validation');
+
+  /* 4. 后端服务：RSS 重定向防护、iTunes 搜索与榜单解析 */
+  const service = loadModule('src/podcast/service.js', {
     axios: {
       create: () => ({
-        post: async (url, body, options) => {
-          refreshRequest = { url, body, options };
-          return refreshResponse;
+        get: async (url, config = {}) => {
+          if (url === 'https://public.example.com/redirect-to-local') {
+            return {
+              status: 302,
+              headers: { location: 'http://127.0.0.1/secret' },
+              data: '',
+            };
+          }
+          if (url === 'https://public.example.com/feed.xml') {
+            return { status: 200, headers: {}, data: sampleRss };
+          }
+          if (url === 'https://itunes.apple.com/search') {
+            if (config.params.entity === 'podcastEpisode') {
+              return {
+                status: 200,
+                data: {
+                  results: [
+                    {
+                      trackId: 901,
+                      collectionId: 101,
+                      trackName: '搜索单集测试',
+                      collectionName: '播客名',
+                      episodeUrl: 'https://audio.example.com/search-ep.mp3',
+                      feedUrl: 'https://feeds.example.com/show.xml',
+                      trackTimeMillis: 900000,
+                      releaseDate: '2026-11-15T00:00:00Z',
+                    },
+                  ],
+                },
+              };
+            }
+            return {
+              status: 200,
+              data: {
+                results: [
+                  {
+                    collectionId: 101,
+                    collectionName: '声动早咖啡',
+                    artistName: '声动活泼',
+                    feedUrl: 'https://feeds.example.com/morning.xml',
+                    artworkUrl600: 'https://cdn.example.com/morning.jpg',
+                    trackCount: 300,
+                    genres: ['商业', '播客'],
+                  },
+                ],
+              },
+            };
+          }
+          if (url.includes('/rss/toppodcasts/')) {
+            return {
+              status: 200,
+              data: {
+                feed: {
+                  title: { label: 'Apple Podcasts 热门播客' },
+                  updated: { label: '2026-11-19T00:00:00Z' },
+                  entry: [
+                    {
+                      id: { attributes: { 'im:id': '101' } },
+                      'im:name': { label: '声动早咖啡' },
+                      'im:artist': { label: '声动活泼' },
+                      'im:image': [{ label: 'https://cdn.example.com/small.jpg' }],
+                      category: { attributes: { label: '商业' } },
+                    },
+                  ],
+                },
+              },
+            };
+          }
+          if (url === 'https://itunes.apple.com/lookup') {
+            return {
+              status: 200,
+              data: {
+                results: [
+                  {
+                    collectionId: 101,
+                    collectionName: '声动早咖啡',
+                    artistName: '声动活泼',
+                    feedUrl: 'https://feeds.example.com/morning.xml',
+                    artworkUrl600: 'https://cdn.example.com/morning600.jpg',
+                    trackCount: 300,
+                    genres: ['商业', '播客'],
+                  },
+                ],
+              },
+            };
+          }
+          throw new Error(`Unexpected URL in mock: ${url}`);
         },
       }),
     },
-  });
-  const refreshed = await refreshApi.refreshToken('old-refresh', 'old-access');
-  assert.equal(
-    refreshRequest.url,
-    'https://api.xiaoyuzhoufm.com/app_auth_tokens.refresh'
-  );
-  assert.equal(
-    refreshRequest.options.headers['x-jike-access-token'],
-    'old-access'
-  );
-  assert.equal(
-    refreshRequest.options.headers['x-jike-refresh-token'],
-    'old-refresh'
-  );
-  assert.equal(refreshed.tokens.accessToken, 'next-access');
-  refreshResponse = {
-    headers: { 'x-jike-access-token': 'header-access' },
-    data: {},
-  };
-  assert.equal(
-    (await refreshApi.refreshToken('old-refresh', 'old-access')).tokens
-      .accessToken,
-    'header-access'
-  );
-  await assert.rejects(
-    refreshApi.refreshToken('old-refresh'),
-    error => error.status === 400
-  );
-  console.log(
-    'PASS: upstream token refresh path, credential pair and body/header responses'
-  );
-  const adapter = load('src/xyz/adapter.js');
-  assert.equal(
-    adapter.adaptEpisodeToTrack({ eid: 'count-test', playCount: 12345 })
-      .playCount,
-    12345
-  );
-  assert.equal(
-    adapter.adaptEpisodeToTrack({ eid: 'missing-count' }).playCount,
-    null
-  );
-  assert.equal(adapter.formatPlayCount(0), '0次收听');
-  assert.equal(adapter.formatPlayCount(12345), '1.2万次收听');
-  assert.equal(adapter.formatPlayCount(null), '');
-  const sampleEpisode = {
-    eid: 'discovery-episode',
-    title: '测试单集',
-    podcast: { pid: 'discovery-podcast', title: '测试节目' },
-  };
-  const discovery = adapter.adaptDiscovery({
-    data: {
-      data: [
-        { type: 'DISCOVERY_HEADER', data: [{ id: 'banner' }] },
-        {
-          type: 'DISCOVERY_EPISODE_RECOMMEND',
-          data: { target: [{ episode: sampleEpisode }] },
-        },
-        { type: 'EDITOR_PICK', data: { picks: [{ episode: sampleEpisode }] } },
-      ],
+    './security': {
+      validatePublicHttpUrl: security.validatePublicHttpUrl,
+      assertPublicHostResolution: async u => security.validatePublicHttpUrl(u),
     },
   });
-  assert.equal(discovery.episodes.length, 1);
-  assert.equal(discovery.podcasts.length, 1);
-  assert.equal(discovery.episodes[0].ar[0].name, '测试节目');
-  if (process.argv[2]) {
-    const actual = adapter.adaptDiscovery(
-      JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
-    );
-    assert.ok(actual.episodes.length > 0);
-    assert.ok(actual.podcasts.length > 0);
-    console.log(
-      `PASS: supplied response parsed into ${actual.episodes.length} episodes and ${actual.podcasts.length} podcasts`
-    );
-  }
-  const ranked = adapter.adaptRanking({
-    data: {
-      items: [
-        { item: sampleEpisode },
-        { item: { ...sampleEpisode, eid: 'second-episode' } },
-      ],
-    },
-  });
-  assert.equal(ranked.length, 2);
-  assert.equal(ranked[1].eid, 'second-episode');
-  let topRequest;
-  let subscriptionBody;
-  const api = load('src/xyz/api.js', {
-    axios: {
-      create: () => ({
-        get: async (url, options) => {
-          topRequest = { url, options };
-          return { data: {} };
-        },
-        post: async (url, body) => {
-          subscriptionBody = body;
-          return { data: {} };
-        },
-      }),
-    },
-  });
-  await api.getSubscriptions('fake-test-token', { loadMoreKey: { skip: 20 } });
-  for (const [type, category] of Object.entries({
-    HOT: 'HOT_EPISODES_IN_24_HOURS',
-    NEW: 'NEW_STAR_EPISODES',
-    ROCK: 'SKYROCKET_EPISODES',
-  })) {
-    await api.getTopList('fake-test-token', type);
-    assert.equal(
-      topRequest.url,
-      'https://api.xiaoyuzhoufm.com/v1/top-list/get'
-    );
-    assert.equal(topRequest.options.params.category, category);
-  }
-  for (const [type, category] of Object.entries({
-    NEW_STAR: 'NEW_STAR_EPISODES',
-    SPARK: 'SKYROCKET_EPISODES',
-    ' hot ': 'HOT_EPISODES_IN_24_HOURS',
-    SKYROCKET_EPISODES: 'SKYROCKET_EPISODES',
-  })) {
-    await api.getTopList('fake-test-token', type);
-    assert.equal(topRequest.options.params.category, category);
-  }
+
   await assert.rejects(
-    api.getTopList('fake-test-token', 'unknown'),
-    error => error.status === 400
+    service.fetchFeed('https://public.example.com/redirect-to-local'),
+    err => err.status === 400
   );
-  await assert.rejects(
-    api.getTopList('fake-test-token', {}),
-    error => error.status === 400
-  );
-  console.log(
-    'PASS: ranking endpoint, current/legacy categories, invalid input and ordered episode adaptation'
-  );
-  assert.equal(subscriptionBody.sortBy, 'subscribedAt');
-  assert.equal(subscriptionBody.sortOrder, 'desc');
-  assert.equal(subscriptionBody.loadMoreKey.skip, 20);
-  console.log(
-    'PASS: nested discovery cards, deduplication and subscription sort contract'
-  );
+  const fetched = await service.fetchFeed('https://public.example.com/feed.xml');
+  assert.equal(fetched.podcast.title, '测试中文播客 & 漫谈');
+  assert.equal(fetched.episodes.length, 1);
+
+  const podSearch = await service.searchPodcasts({ term: '早咖啡', entity: 'podcast' });
+  assert.equal(podSearch.items.length, 1);
+  assert.equal(podSearch.items[0].feedUrl, 'https://feeds.example.com/morning.xml');
+
+  const epSearch = await service.searchPodcasts({
+    term: '测试',
+    entity: 'podcastEpisode',
+  });
+  assert.equal(epSearch.items.length, 1);
+  assert.equal(epSearch.items[0].duration, 900);
+
+  const charts = await service.getTopCharts({ country: 'CN', limit: 10 });
+  assert.equal(charts.items.length, 1);
+  assert.equal(charts.items[0].feedUrl, 'https://feeds.example.com/morning.xml');
+  assert.equal(charts.items[0].coverImgUrl, 'https://cdn.example.com/morning600.jpg');
+  console.log('PASS: feed fetch, redirect SSRF guard, iTunes search and top charts');
+
+  /* 5. 本地存储与适配器 */
+  localStorage.clear();
+  const adapter = loadModule('src/podcast/adapter.js');
+  const podStorage = loadModule('src/podcast/storage.js');
+
   const track = adapter.adaptEpisodeToTrack(
-    {
-      eid: 'e1',
-      duration: 120,
-      playbackProgress: { progress: 42 },
-      media: { source: { url: 'https://audio.example/test.m4a' } },
-    },
-    {
-      pid: 'p1',
-      name: '节目名称',
-      coverImgUrl: 'https://image.example/cover.jpg',
-    }
+    parsedRss.episodes[0],
+    parsedRss.podcast
   );
-  assert.equal(track.ar[0].name, '节目名称');
-  assert.equal(track.al.picUrl, 'https://image.example/cover.jpg');
-  assert.equal(track.playbackProgress, 42);
-  assert.equal(track.dt, 120000);
-  assert.equal(adapter.adaptEpisodeToTrack({}), null);
-  assert.equal(adapter.xyzList({ data: { items: [1, 2] } }).length, 2);
-  assert.equal(adapter.xyzCursor({ loadMoreKey: { id: 'next' } }).id, 'next');
-  let responseError;
-  let refreshes = 0;
-  let retries = 0;
-  const client = config => {
-    retries++;
-    return Promise.resolve(config);
-  };
-  client.interceptors = {
-    request: { use() {} },
-    response: {
-      use(ok, error) {
-        responseError = error;
-      },
-    },
-  };
-  client.post = async () => {
-    refreshes++;
-    await new Promise(resolve => setTimeout(resolve, 5));
-    return { tokens: { accessToken: 'new', refreshToken: 'refresh-new' } };
-  };
-  const session = load('src/xyz/client.js', {
-    axios: { create: () => client },
-  });
-  assert.match(
-    session.xyzErrorMessage({
-      response: { data: { error: { message: 'empty captchaVerifyParam' } } },
-    }),
-    /尚未接入/
-  );
-  session.setXyzToken('old');
-  session.setXyzRefreshToken('refresh-old');
-  await Promise.all(
-    [1, 2, 3].map(() =>
-      responseError({
-        response: { status: 401 },
-        config: { url: '/subscription' },
-      })
-    )
-  );
-  assert.equal(refreshes, 1, 'parallel 401s must share one refresh');
-  assert.equal(retries, 3);
-  assert.equal(session.getXyzToken(), 'new');
-  client.post = async () => ({
-    data: { uid: 'test-user', nickname: '测试用户' },
-  });
-  const imported = await session.importXyzSession(
-    'test-access',
-    'test-refresh'
-  );
-  assert.equal(imported.uid, 'test-user');
-  assert.equal(session.getXyzToken(), 'test-access');
-  client.post = async () => {
-    throw new Error('verification failed');
-  };
-  await assert.rejects(session.importXyzSession('invalid-access'));
-  assert.equal(
-    session.getXyzToken(),
-    'test-access',
-    'failed import must retain previous session'
-  );
-  await assert.rejects(session.importXyzSession('full cookie value'));
-  session.logoutXyz();
-  assert.equal(session.isXyzLoggedIn(), false);
-  assert.equal(session.getXyzRefreshToken(), '');
-  const mocks = {};
+  assert.ok(track.id.startsWith('rss_'));
+  assert.equal(track.isPodcast, true);
+  assert.equal(track.dt, 4325000);
+  assert.equal(track.ar[0].name, '测试中文播客 & 漫谈');
+
+  const sub = podStorage.subscribePodcast(parsedRss.podcast);
+  assert.equal(podStorage.isSubscribed(sub.feedUrl), true);
+  assert.equal(podStorage.getFeedUrlByPid(sub.pid), sub.feedUrl);
+  const batchRes = podStorage.importSubscriptionsBatch([
+    { feedUrl: sub.feedUrl, title: '重复' },
+    { feedUrl: 'https://feeds.example.com/new.xml', title: '新播客' },
+  ]);
+  assert.equal(batchRes.added, 1);
+  assert.equal(batchRes.skipped, 1);
+
+  podStorage.saveEpisodeProgress(track.eid, 128);
+  assert.equal(podStorage.getEpisodeProgress(track.eid), 128);
+  podStorage.recordListeningHistory(track, 128);
+  assert.equal(podStorage.getListeningHistory().length, 1);
+  assert.equal(podStorage.getCachedTrackById(track.id).url, track.url);
+
+  podStorage.unsubscribePodcast(sub.pid);
+  assert.equal(podStorage.isSubscribed(sub.feedUrl), false);
+  console.log('PASS: adapter and local subscription/history/progress storage');
+
+  /* 6. Player 集成校验（无任何小宇宙私有 API 调用） */
+  const playerMocks = {};
   const playerSource = fs.readFileSync('src/utils/Player.js', 'utf8');
-  for (const match of playerSource.matchAll(/from '([^']+)'/g))
-    mocks[match[1]] = {};
-  mocks['@/xyz/client'] = { xyzService: {}, isXyzLoggedIn: () => false };
-  const Player = load('src/utils/Player.js', mocks, {
+  assert.ok(!/xiaoyuzhou|@\/xyz/.test(playerSource), 'Player.js must not reference xyz');
+  for (const match of playerSource.matchAll(/from '([^']+)'/g)) {
+    playerMocks[match[1]] = {};
+  }
+  const Player = loadModule('src/utils/Player.js', playerMocks, {
     process: { env: {} },
   }).default;
+
   const player = Object.create(Player.prototype);
   player._currentTrack = track;
-  player._howler = { _xyzEid: 'other', seek: () => 33 };
+  player._howler = { _podcastEid: 'other-eid', seek: () => 55 };
   player._syncPodcastProgress();
   assert.equal(
-    localStorage.getItem('xyz_progress_e1'),
-    null,
-    'old audio cannot overwrite another episode'
+    podStorage.getEpisodeProgress(track.eid),
+    128,
+    'mismatched audio instance must not overwrite progress'
   );
-  player._howler._xyzEid = 'e1';
+  player._howler._podcastEid = track.eid;
   player._syncPodcastProgress();
-  assert.equal(localStorage.getItem('xyz_progress_e1'), '33');
-  player._currentTrack = { id: 123 };
+  assert.equal(podStorage.getEpisodeProgress(track.eid), 55);
+
+  player._currentTrack = { id: 12345 };
   player._playlistSource = { type: 'podcast' };
-  assert.equal(player.isPodcast, false, 'music must not inherit podcast mode');
-  let rate;
-  player._howler.rate = value => {
-    rate = value;
+  assert.equal(player.isPodcast, false, 'music track must not inherit podcast mode');
+  let appliedRate;
+  player._howler.rate = val => {
+    appliedRate = val;
   };
   player.playbackRate = 1.5;
-  assert.equal(rate, 1, 'music must remain normal speed');
+  assert.equal(appliedRate, 1, 'music playback must remain 1x');
   player._currentTrack = track;
   player.playbackRate = 1.5;
-  assert.equal(rate, 1.5);
-  console.log(
-    'PASS: audio ownership, local resume, podcast detection and music/podcast playback rates'
-  );
-  console.log(
-    'PASS: adapter metadata, duration, progress, invalid episodes, nested lists, pagination, concurrent refresh, retry and logout'
-  );
+  assert.equal(appliedRate, 1.5, 'podcast playback must apply custom rate');
+  console.log('PASS: Player RSS integration, local progress ownership and rate isolation');
 }
-main().catch(error => {
-  console.error(error);
+
+main().catch(err => {
+  console.error(err);
   process.exitCode = 1;
 });

@@ -63,23 +63,31 @@
                 </div>
                 <div class="subtitle">
                   <router-link
-                    v-if="artist.id !== 0"
-                    :to="`/artist/${artist.id}`"
+                    v-if="player.isPodcast && currentTrack.pid"
+                    :to="`/podcast/${currentTrack.pid}`"
                     @click.native="toggleLyrics"
                     >{{ artist.name }}
                   </router-link>
-                  <span v-else>
-                    {{ artist.name }}
-                  </span>
-                  <span v-if="album.id !== 0">
-                    -
+                  <template v-else>
                     <router-link
-                      :to="`/album/${album.id}`"
-                      :title="album.name"
+                      v-if="artist.id !== 0"
+                      :to="`/artist/${artist.id}`"
                       @click.native="toggleLyrics"
-                      >{{ album.name }}
+                      >{{ artist.name }}
                     </router-link>
-                  </span>
+                    <span v-else>
+                      {{ artist.name }}
+                    </span>
+                    <span v-if="album.id !== 0">
+                      -
+                      <router-link
+                        :to="`/album/${album.id}`"
+                        :title="album.name"
+                        @click.native="toggleLyrics"
+                        >{{ album.name }}
+                      </router-link>
+                    </span>
+                  </template>
                 </div>
               </div>
               <div class="top-right">
@@ -232,14 +240,7 @@
       </div>
       <div class="right-side">
         <div v-if="player.isPodcast" class="podcast-shownotes">
-          <div class="shownotes-header"
-            >Show Notes · 节目单
-            <div
-              v-if="currentTrack.playCount != null"
-              class="shownotes-listens"
-              >{{ formatPlayCount(currentTrack.playCount) }}</div
-            >
-          </div>
+          <div class="shownotes-header">Show Notes · 节目单</div>
           <div
             class="shownotes-body"
             v-html="formatShowNotes(currentTrack.showNotes)"
@@ -582,11 +583,8 @@ export default {
         this.player.playNextTrack();
       }
     },
-    formatPlayCount(count) {
-      return require('@/xyz/adapter').formatPlayCount(count);
-    },
     formatShowNotes(notes) {
-      return require('@/xyz/notes').formatShowNotes(notes);
+      return require('@/podcast/notes').formatShowNotes(notes);
     },
     getLyric() {
       if (!this.currentTrack.id) return;
